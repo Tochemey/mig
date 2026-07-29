@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Transactional DDL steps. A step without a *notx* annotation runs inside a transaction the executor opens, and its ledger row is written in that same transaction — the fence is asserted first, the DDL runs, the row is written, and one commit covers all three. A run killed part-way through leaves the ledger exactly as it was, so unlike a concurrent index build there is nothing to reconcile and no repair or postcondition check to perform. It is also the one place the ledger is allowed to decide whether work remains: a row saying *succeeded* committed with the DDL it describes, which is what lets a statement carrying no inferable predicate be skipped on the next run rather than reapplied.
+
+- *mig* is now a [cobra](https://github.com/spf13/cobra) command tree, with *--help* per command, *--version*, and shell completion. Exit codes are unchanged and still distinguish a failed run from another runner holding the lease.
+
 - *cmd/mig up*: applies a directory of annotated SQL and converges on it. Ordered by a zero-padded timestamp in the file name, one lease per run, one pinned connection per step. A machine-readable summary goes to stdout and structured logs to stderr, so the two never interleave. Exit codes distinguish a failure from another runner holding the lease.
 
 - *internal/exec*: the executor. Before anything else it asks the catalog whether the step's work is already present, unconditionally rather than when the ledger looks suspicious, and skips the step if so. Only then does it consult the ledger, and only to decide whether an earlier attempt left the database part-way through and needs repairing first. Attempts are recorded before the work starts, so a crash during the work leaves evidence. After the work it re-checks the predicate: a step that reports success without changing the catalog fails rather than being recorded as done.

@@ -28,12 +28,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver
+	"github.com/spf13/cobra"
 
 	"github.com/tochemey/mig/internal/crash"
 	"github.com/tochemey/mig/internal/exec"
@@ -47,32 +47,43 @@ import (
 // own pool so a saturated work pool cannot starve the heartbeat.
 const controlConns = 2
 
-// up applies every pending step, converging on the plan.
-func up(ctx context.Context, args []string, stdout, stderr io.Writer) (code int, err error) {
+// newUpCommand builds the command that applies pending steps.
+func newUpCommand() *cobra.Command {
 	var cfg config
 
-	flags := flag.NewFlagSet("up", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	bind(flags, &cfg)
-
-	if err := flags.Parse(args); err != nil {
-		return ExitError, err
+	cmd := &cobra.Command{
+		Use:   "up",
+		Short: "Apply pending migrations, converging on the plan",
+		Long: "Apply every pending step, in order, under a single lease.\n\n" +
+			"A run that is killed at any point can simply be run again: each step is\n" +
+			"judged against the catalog rather than against the ledger.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runUp(cmd.Context(), cfg, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		},
 	}
 
+	bind(cmd, &cfg)
+
+	return cmd
+}
+
+// runUp applies every pending step, converging on the plan.
+func runUp(ctx context.Context, cfg config, stdout, stderr io.Writer) (err error) {
 	if cfg.dsn == "" {
-		return ExitError, fmt.Errorf("no connection string: pass --dsn or set %s", EnvDSN)
+		return fmt.Errorf("no connection string: pass --dsn or set %s", EnvDSN)
 	}
 
 	log := logger(stderr, cfg.verbose)
 
 	loaded, err := plan.Load(cfg.dir)
 	if err != nil {
-		return ExitError, err
+		return err
 	}
 
 	control, err := open(ctx, cfg.dsn)
 	if err != nil {
-		return ExitError, err
+		return err
 	}
 
 	// A pool that will not close cleanly is reported, and turns an otherwise
@@ -80,13 +91,7 @@ func up(ctx context.Context, args []string, stdout, stderr io.Writer) (code int,
 	// failing loudly costs a repeat of a converged run; staying quiet hides a
 	// connection that never went away.
 	defer func() {
-		if closeErr := closePool(control); closeErr != nil {
-			err = errors.Join(err, closeErr)
-
-			if code == ExitOK {
-				code = ExitError
-			}
-		}
+		err = errors.Join(err, closePool(control))
 	}()
 
 	return apply(ctx, control, cfg, loaded, log, stdout)
@@ -135,9 +140,9 @@ func closePool(db *sql.DB) error {
 
 // apply takes the lease and runs the plan under it.
 func apply(ctx context.Context, control *sql.DB, cfg config,
-	loaded *plan.Plan, log *slog.Logger, stdout io.Writer) (int, error) {
+	loaded *plan.Plan, log *slog.Logger, stdout io.Writer) error {
 	if err := ledger.EnsureSchema(ctx, control); err != nil {
-		return ExitError, err
+		return err
 	}
 
 	crash.At(crash.BeforeLeaseAcquire)
@@ -149,11 +154,10 @@ func apply(ctx context.Context, control *sql.DB, cfg config,
 	})
 	if err != nil {
 		if errors.Is(err, lease.ErrLocked) {
-			log.Info("another runner holds the lease")
-			return ExitLocked, nil
+			return exitError{code: ExitLocked, err: err}
 		}
 
-		return ExitError, err
+		return err
 	}
 
 	crash.At(crash.AfterLeaseAcquire)
@@ -171,23 +175,18 @@ func apply(ctx context.Context, control *sql.DB, cfg config,
 
 	summary, runErr := executor.Run(work, loaded)
 
-	// The summary is emitted even when the run failed: it says how far the run
-	// got, which is what the next run has to reconcile against.
-	if err := emit(stdout, summary); err != nil {
-		return ExitError, err
-	}
-
-	if runErr != nil {
-		return ExitError, runErr
-	}
-
 	crash.At(crash.BeforeLeaseRelease)
 
-	if err := held.Release(context.WithoutCancel(ctx)); err != nil {
-		return ExitError, err
-	}
+	// The lease is handed back whether or not the run succeeded. A failed run
+	// that kept it would lock every later run out until the TTL lapsed, which
+	// turns one broken migration into a window in which nothing can be applied.
+	releaseErr := held.Release(context.WithoutCancel(ctx))
 
-	return ExitOK, nil
+	// The summary is emitted even when the run failed: it says how far the run
+	// got, which is what the next run has to reconcile against.
+	emitErr := emit(stdout, summary)
+
+	return errors.Join(runErr, releaseErr, emitErr)
 }
 
 // emit writes the machine-readable summary to stdout.

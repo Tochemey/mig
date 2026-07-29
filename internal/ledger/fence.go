@@ -43,14 +43,15 @@ SELECT 1
  WHERE id = 1 AND owner = $1 AND fence = $2
    FOR UPDATE`
 
-// txOptions pins the isolation level of every ledger transaction.
+// TxOptions pins the isolation level of every transaction carrying a ledger
+// write, including one a step opens for its own DDL.
 //
 // Read Committed is required, and nil would inherit
 // default_transaction_isolation from the cluster. Under a snapshot isolation
 // level, SELECT ... FOR UPDATE against a row a successor has already updated
 // aborts with a serialisation failure instead of returning no rows, which
 // would report a final [ErrFenced] as a retryable error.
-func txOptions() *sql.TxOptions {
+func TxOptions() *sql.TxOptions {
 	return &sql.TxOptions{Isolation: sql.LevelReadCommitted}
 }
 
@@ -94,7 +95,7 @@ func Guard(ctx context.Context, tx *sql.Tx, f Fence) error {
 // other route lets a runner that was frozen past its lease expiry overwrite
 // the state of the runner that replaced it.
 func Write(ctx context.Context, db *sql.DB, f Fence, fn func(context.Context, *sql.Tx) error) (err error) {
-	tx, err := db.BeginTx(ctx, txOptions())
+	tx, err := db.BeginTx(ctx, TxOptions())
 	if err != nil {
 		return fmt.Errorf("begin fenced write: %w", err)
 	}

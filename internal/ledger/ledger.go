@@ -89,7 +89,7 @@ var schemaStatements = []string{
 // EnsureSchema creates the ledger schema if it is absent. It is idempotent and
 // safe to call from several runners at once.
 func EnsureSchema(ctx context.Context, db *sql.DB) (err error) {
-	tx, err := db.BeginTx(ctx, txOptions())
+	tx, err := db.BeginTx(ctx, TxOptions())
 	if err != nil {
 		return fmt.Errorf("begin ledger schema transaction: %w", err)
 	}

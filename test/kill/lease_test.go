@@ -55,10 +55,9 @@ var (
 	// migBin is the migrator itself.
 	migBin string
 
-	// goldenState is the result of an uninterrupted run, captured once and
-	// compared against by every recovery test.
-	goldenState harness.State
-	goldenOnce  sync.Once
+	// goldenStates holds, per migration, the result of an uninterrupted run.
+	goldenStates = map[string]harness.State{}
+	goldenMu     sync.Mutex
 )
 
 // TestMain brings up one container and builds the binaries these tests spawn.

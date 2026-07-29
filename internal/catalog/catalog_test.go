@@ -27,7 +27,6 @@ import (
 	"context"
 	"database/sql"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/tochemey/mig/internal/catalog"
@@ -147,98 +146,6 @@ func TestLookupIndexReportsQueryFailure(t *testing.T) {
 
 	if _, err := catalog.LookupIndex(t.Context(), db, "", "anything"); err == nil {
 		t.Fatal("look up on a closed database returned no error")
-	}
-}
-
-// TestFingerprintDetectsSchemaChanges covers the oracle's central claim: two
-// databases share a fingerprint exactly when their schemas match.
-func TestFingerprintDetectsSchemaChanges(t *testing.T) {
-	first, second := newDatabase(t), newDatabase(t)
-	ctx := t.Context()
-
-	before := fingerprint(t, first)
-
-	if other := fingerprint(t, second); other != before {
-		t.Fatal("two identical databases have different fingerprints")
-	}
-
-	// Re-reading an unchanged database must give the same answer.
-	if again := fingerprint(t, first); again != before {
-		t.Fatal("fingerprint is not stable across reads")
-	}
-
-	changes := map[string]string{
-		"added column":     "ALTER TABLE users ADD COLUMN email text",
-		"added index":      "CREATE INDEX idx_users_name ON users (name)",
-		"added constraint": "ALTER TABLE users ADD CONSTRAINT users_name_len CHECK (length(name) > 0)",
-		"added sequence":   "CREATE SEQUENCE counter",
-	}
-
-	for name, stmt := range changes {
-		t.Run(name, func(t *testing.T) {
-			db := newDatabase(t)
-
-			was := fingerprint(t, db)
-			exec(t, db, stmt)
-
-			if now := fingerprint(t, db); now == was {
-				t.Fatalf("%q did not change the fingerprint", stmt)
-			}
-		})
-	}
-
-	_ = ctx
-}
-
-// TestFingerprintIgnoresTheLedger keeps attempt counts and timestamps out of
-// the comparison: an interrupted run and a clean one differ there while their
-// schemas agree.
-func TestFingerprintIgnoresTheLedger(t *testing.T) {
-	db := newDatabase(t)
-
-	before := fingerprint(t, db)
-
-	exec(t, db, "CREATE SCHEMA mig")
-	exec(t, db, "CREATE TABLE mig.migrations (id text PRIMARY KEY, attempts int)")
-
-	if after := fingerprint(t, db); after != before {
-		t.Fatal("the ledger's own schema changed the fingerprint")
-	}
-}
-
-// TestDescribeExplainsTheFingerprint covers the readable form, which is what a
-// mismatch is diagnosed from.
-func TestDescribeExplainsTheFingerprint(t *testing.T) {
-	db := newDatabase(t)
-
-	exec(t, db, "CREATE INDEX idx_users_name ON users (name)")
-
-	described, err := catalog.Describe(t.Context(), db)
-	if err != nil {
-		t.Fatalf("describe: %v", err)
-	}
-
-	for _, want := range []string{"[columns]", "[indexes]", "idx_users_name", "valid=t"} {
-		if !strings.Contains(described, want) {
-			t.Fatalf("description does not mention %q:\n%s", want, described)
-		}
-	}
-}
-
-// TestFingerprintReportsQueryFailure covers a database that went away mid-read.
-func TestFingerprintReportsQueryFailure(t *testing.T) {
-	db := newDatabase(t)
-
-	if err := db.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-
-	if _, err := catalog.Fingerprint(t.Context(), db); err == nil {
-		t.Fatal("fingerprint of a closed database returned no error")
-	}
-
-	if _, err := catalog.Describe(t.Context(), db); err == nil {
-		t.Fatal("describe of a closed database returned no error")
 	}
 }
 

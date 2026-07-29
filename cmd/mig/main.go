@@ -25,7 +25,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 
@@ -33,10 +32,10 @@ import (
 )
 
 func main() {
-	code, err := cli.Main(context.Background(), os.Args[1:], os.Stdout, os.Stderr)
+	err := cli.New().Execute()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mig: %v\n", err)
 	}
 
-	os.Exit(code)
+	os.Exit(cli.ExitCode(err))
 }

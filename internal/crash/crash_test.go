@@ -27,6 +27,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"regexp"
 	"syscall"
 	"testing"
 
@@ -91,13 +92,61 @@ func TestAtIgnoresUnarmedProcess(t *testing.T) {
 	}
 }
 
+// TestEveryPointFires checks each named point individually. A constant that is
+// never armed anywhere is a crash the matrices believe they are exercising and
+// are not.
+func TestEveryPointFires(t *testing.T) {
+	for _, point := range crash.Points() {
+		t.Run(point, func(t *testing.T) {
+			if os.Getenv(envChild) == "1" {
+				crash.At(os.Getenv(crash.EnvPoint))
+				os.Exit(0)
+			}
+
+			err := reexec(t, point)
+
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("child exited with %v, want a fatal signal", err)
+			}
+
+			status, ok := exitErr.Sys().(syscall.WaitStatus)
+			if !ok {
+				t.Fatalf("unexpected wait status type %T", exitErr.Sys())
+			}
+
+			if !status.Signaled() || status.Signal() != syscall.SIGKILL {
+				t.Fatalf("child exited with %v, want SIGKILL", exitErr)
+			}
+		})
+	}
+}
+
+// TestPointsAreDistinct keeps two sites from sharing a name, which would arm
+// both at once and make the matrix row that used it prove nothing.
+func TestPointsAreDistinct(t *testing.T) {
+	seen := make(map[string]bool)
+
+	for _, point := range crash.Points() {
+		if point == "" {
+			t.Fatal("a crash point has an empty name, which would arm on an unset variable")
+		}
+
+		if seen[point] {
+			t.Fatalf("crash point %q is declared twice", point)
+		}
+
+		seen[point] = true
+	}
+}
+
 // reexec runs this test again as a child with point armed, returning the exit
 // error. An empty point leaves the process unarmed.
 func reexec(t *testing.T, point string) error {
 	t.Helper()
 
 	//nolint:gosec // G204: the arguments are this test binary and its own name.
-	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
+	cmd := exec.Command(os.Args[0], "-test.run=^"+regexp.QuoteMeta(t.Name())+"$")
 	cmd.Env = append(os.Environ(), envChild+"=1")
 
 	if point != "" {

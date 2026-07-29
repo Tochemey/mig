@@ -23,19 +23,16 @@
 
 // Package cli holds the command-line surface.
 //
-// It lives here rather than in cmd/mig so that the commands can be driven
-// directly, without a subprocess, wherever a subprocess is not what is being
-// tested.
+// It lives here rather than in cmd/mig so the commands can be driven directly,
+// without a subprocess, wherever a subprocess is not what is being tested.
 package cli
 
 import (
-	"context"
 	"errors"
-	"flag"
-	"fmt"
-	"io"
 	"os"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/tochemey/mig/internal/lease"
 )
@@ -43,8 +40,8 @@ import (
 // Version identifies this build in application_name and in logs.
 const Version = "0.1.0"
 
-// Exit codes. They are part of the interface: a job scheduler distinguishes
-// "someone else is applying" from "the migration failed".
+// Exit codes. They are part of the interface: a job scheduler has to tell
+// "another runner is applying" from "the migration failed".
 const (
 	// ExitOK means the run converged.
 	ExitOK = 0
@@ -60,29 +57,61 @@ const (
 	ExitLocked = 4
 )
 
-// Environment variables that supply defaults for the flags of the same name.
+// Environment variables supplying defaults for the flags of the same name.
 const (
 	EnvDSN      = "MIG_DSN"
 	EnvDir      = "MIG_DIR"
 	EnvLeaseTTL = "MIG_LEASE_TTL"
 )
 
-// ErrUsage reports a command line that could not be understood.
-var ErrUsage = errors.New("usage: mig up [flags]")
-
-// Main dispatches a command and returns the process exit code.
-func Main(ctx context.Context, args []string, stdout, stderr io.Writer) (int, error) {
-	if len(args) == 0 {
-		return ExitError, ErrUsage
+// New builds the command tree.
+//
+// Usage is silenced on failure: a migration that could not run is not a usage
+// problem, and burying the reason under a page of flags helps nobody. Errors
+// are silenced too, so that main prints them once.
+func New() *cobra.Command {
+	root := &cobra.Command{
+		Use:           "mig",
+		Short:         "Postgres migrations you can kill and re-run",
+		Version:       Version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
 
-	switch args[0] {
-	case "up":
-		return up(ctx, args[1:], stdout, stderr)
+	root.AddCommand(newUpCommand())
 
-	default:
-		return ExitError, fmt.Errorf("%w: unknown command %q", ErrUsage, args[0])
+	return root
+}
+
+// exitError carries the process exit code for a failure the caller has to
+// distinguish from an ordinary one.
+type exitError struct {
+	code int
+	err  error
+}
+
+// Error reports the underlying failure.
+func (e exitError) Error() string {
+	return e.err.Error()
+}
+
+// Unwrap exposes the underlying failure to errors.Is and errors.As.
+func (e exitError) Unwrap() error {
+	return e.err
+}
+
+// ExitCode maps the result of Execute to a process exit code.
+func ExitCode(err error) int {
+	if err == nil {
+		return ExitOK
 	}
+
+	var exit exitError
+	if errors.As(err, &exit) {
+		return exit.code
+	}
+
+	return ExitError
 }
 
 // config is what every command needs to reach the database.
@@ -96,7 +125,9 @@ type config struct {
 }
 
 // bind registers the common flags, defaulting from the environment.
-func bind(flags *flag.FlagSet, cfg *config) {
+func bind(cmd *cobra.Command, cfg *config) {
+	flags := cmd.Flags()
+
 	flags.StringVar(&cfg.dsn, "dsn", os.Getenv(EnvDSN), "postgres connection string")
 	flags.StringVar(&cfg.dir, "dir", envOr(EnvDir, "migrations"), "directory holding migration files")
 	flags.DurationVar(&cfg.ttl, "lease-ttl", envDuration(EnvLeaseTTL, lease.DefaultTTL), "lease validity window")
@@ -115,7 +146,7 @@ func envOr(name, fallback string) string {
 }
 
 // envDuration parses a duration from the environment, ignoring an unusable one
-// so that a stray value cannot silently shorten a lease.
+// so a stray value cannot silently shorten a lease.
 func envDuration(name string, fallback time.Duration) time.Duration {
 	value := os.Getenv(name)
 	if value == "" {

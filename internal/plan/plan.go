@@ -84,10 +84,13 @@ func (s Step) Build() (step.Step, error) {
 	check := s.predicate()
 
 	switch s.Kind {
+	case step.KindDDLTx:
+		return step.NewDDLTx(meta, s.Statements, check), nil
+
 	case step.KindDDLNoTx:
 		return step.NewDDLNoTx(meta, s.Statements, check)
 
-	case step.KindDDLTx, step.KindBackfill:
+	case step.KindBackfill:
 		return nil, fmt.Errorf("step %q: %w", s.Name, ErrKindUnsupported)
 
 	default:

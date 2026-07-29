@@ -53,7 +53,7 @@ func TestIndexBuildConvergesFromEveryCrashPoint(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			env := newRun(t)
+			env := newRun(t, indexFixture)
 
 			env.crash(tc.point)
 			env.converge()
@@ -70,7 +70,7 @@ func TestIndexBuildConvergesFromEveryCrashPoint(t *testing.T) {
 func TestIndexBuildConvergesFromAnInterruptedBuild(t *testing.T) {
 	t.Parallel()
 
-	env := newRun(t)
+	env := newRun(t, indexFixture)
 
 	env.killMidBuild()
 	env.requireInvalidIndex()
@@ -87,7 +87,7 @@ func TestIndexBuildConvergesFromAnInterruptedBuild(t *testing.T) {
 func TestRepairSurvivesBeingKilled(t *testing.T) {
 	t.Parallel()
 
-	env := newRun(t)
+	env := newRun(t, indexFixture)
 
 	env.killMidBuild()
 	env.requireInvalidIndex()
@@ -105,7 +105,7 @@ func TestRepairSurvivesBeingKilled(t *testing.T) {
 func TestUninterruptedRunConverges(t *testing.T) {
 	t.Parallel()
 
-	env := newRun(t)
+	env := newRun(t, indexFixture)
 
 	summary := env.run()
 	if summary.Applied != 1 {

@@ -91,3 +91,14 @@ type NoTxStep interface {
 
 	Apply(ctx context.Context, conn *sql.Conn) error
 }
+
+// TxStep applies inside a transaction the executor supplies.
+//
+// The executor writes the ledger row in that same transaction, so the work and
+// the record of it commit together and no reconciliation window exists. Moving
+// that write out would silently reintroduce the window.
+type TxStep interface {
+	Step
+
+	ApplyTx(ctx context.Context, tx *sql.Tx) error
+}

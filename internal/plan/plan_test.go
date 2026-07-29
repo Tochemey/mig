@@ -233,9 +233,10 @@ CREATE INDEX CONCURRENTLY idx_users_email ON users (email);
 	}
 }
 
-// TestBuildRejectsUnsupportedKinds records what this build cannot run yet, so
-// a transactional step fails loudly rather than being silently skipped.
-func TestBuildRejectsUnsupportedKinds(t *testing.T) {
+// TestBuildAcceptsATransactionalStep covers the default kind. A step with no
+// notx annotation runs inside a transaction shared with its ledger write, and
+// needs no predicate because there is no window to reconcile.
+func TestBuildAcceptsATransactionalStep(t *testing.T) {
 	dir := write(t, map[string]string{
 		"20240817120000_tx.sql": "ALTER TABLE users ADD COLUMN email text;\n",
 	})
@@ -245,7 +246,32 @@ func TestBuildRejectsUnsupportedKinds(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 
-	if _, err := loaded.Migrations[0].Steps[0].Build(); !errors.Is(err, plan.ErrKindUnsupported) {
+	built, err := loaded.Migrations[0].Steps[0].Build()
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	if built.Meta().Kind != step.KindDDLTx {
+		t.Fatalf("built step has kind %q", built.Meta().Kind)
+	}
+
+	if _, ok := built.(step.TxStep); !ok {
+		t.Fatalf("built step is %T, which does not apply inside a transaction", built)
+	}
+}
+
+// TestBuildRejectsUnsupportedKinds records what this build cannot run yet, so
+// an unimplemented kind fails loudly rather than being silently skipped.
+func TestBuildRejectsUnsupportedKinds(t *testing.T) {
+	unsupported := plan.Step{Name: "backfill_email", Kind: step.KindBackfill}
+
+	if _, err := unsupported.Build(); !errors.Is(err, plan.ErrKindUnsupported) {
+		t.Fatalf("build returned %v, want ErrKindUnsupported", err)
+	}
+
+	unknown := plan.Step{Name: "mystery", Kind: "teleport"}
+
+	if _, err := unknown.Build(); !errors.Is(err, plan.ErrKindUnsupported) {
 		t.Fatalf("build returned %v, want ErrKindUnsupported", err)
 	}
 }

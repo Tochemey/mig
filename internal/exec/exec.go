@@ -36,6 +36,7 @@
 package exec
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -46,6 +47,7 @@ import (
 	"github.com/tochemey/mig/internal/ledger"
 	"github.com/tochemey/mig/internal/plan"
 	"github.com/tochemey/mig/internal/session"
+	"github.com/tochemey/mig/internal/step"
 )
 
 var (
@@ -100,14 +102,25 @@ func (e *Executor) Run(ctx context.Context, p *plan.Plan) (Summary, error) {
 	started := time.Now()
 	summary := Summary{}
 
+	// Everything is built before anything is applied. A step that cannot be
+	// executed — a non-transactional one with no way to recognise its own
+	// finished work — has to stop the run while the database is still whole.
+	// Discovering it half way through would leave exactly the state this tool
+	// exists to avoid: some migrations applied, one refused, and nobody able to
+	// say what the database now is.
+	built, err := build(p)
+	if err != nil {
+		return summary, err
+	}
+
 	if err := e.record(ctx, p); err != nil {
 		return summary, err
 	}
 
-	for _, migration := range p.Migrations {
+	for i, migration := range p.Migrations {
 		summary.Migrations++
 
-		if err := e.runMigration(ctx, migration, &summary); err != nil {
+		if err := e.runMigration(ctx, migration, built[i], &summary); err != nil {
 			summary.finish(started)
 			return summary, err
 		}
@@ -116,6 +129,27 @@ func (e *Executor) Run(ctx context.Context, p *plan.Plan) (Summary, error) {
 	summary.finish(started)
 
 	return summary, nil
+}
+
+// build turns every step of every migration into its executable form, in the
+// same order, and reports the first that cannot be built.
+func build(p *plan.Plan) ([][]step.Step, error) {
+	built := make([][]step.Step, len(p.Migrations))
+
+	for i, migration := range p.Migrations {
+		built[i] = make([]step.Step, len(migration.Steps))
+
+		for j, spec := range migration.Steps {
+			work, err := spec.Build()
+			if err != nil {
+				return nil, fmt.Errorf("migration %q: %w", migration.ID, err)
+			}
+
+			built[i][j] = work
+		}
+	}
+
+	return built, nil
 }
 
 // record writes the pending rows for everything in the plan, and checks the
@@ -168,7 +202,7 @@ func (e *Executor) checkDrift(ctx context.Context, migration plan.Migration) err
 			return err
 		}
 
-		if recorded.Status != ledger.StatusSucceeded || bytesEqual(recorded.Checksum, s.Checksum) {
+		if recorded.Status != ledger.StatusSucceeded || bytes.Equal(recorded.Checksum, s.Checksum) {
 			continue
 		}
 
@@ -182,25 +216,11 @@ func (e *Executor) checkDrift(ctx context.Context, migration plan.Migration) err
 	return nil
 }
 
-// bytesEqual compares two checksums.
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-
-	return true
-}
-
 // runMigration applies every step of one migration.
-func (e *Executor) runMigration(ctx context.Context, migration plan.Migration, summary *Summary) error {
-	for _, s := range migration.Steps {
-		if err := e.runStep(ctx, migration, s, summary); err != nil {
+func (e *Executor) runMigration(ctx context.Context, migration plan.Migration,
+	built []step.Step, summary *Summary) error {
+	for i, spec := range migration.Steps {
+		if err := e.runStep(ctx, migration, spec, built[i], summary); err != nil {
 			return err
 		}
 	}

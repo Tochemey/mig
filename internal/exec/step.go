@@ -37,21 +37,30 @@ import (
 	"github.com/tochemey/mig/internal/step"
 )
 
+// stepRun is one step's execution: what to run, where it runs, and what will be
+// reported about it.
+type stepRun struct {
+	spec    plan.Step
+	work    step.Step
+	key     ledger.StepKey
+	conn    *sql.Conn
+	result  StepResult
+	started time.Time
+}
+
 // runStep converges one step.
 //
 // The order is the product. The catalog is asked first and always; only then
 // does the ledger get consulted, and only to decide whether a repair is needed
 // before the work is attempted again.
-func (e *Executor) runStep(ctx context.Context, migration plan.Migration,
-	spec plan.Step, summary *Summary) (err error) {
-	key := ledger.StepKey{MigrationID: migration.ID, Index: spec.Index}
-	started := time.Now()
-
-	result := StepResult{Name: spec.Name, Kind: string(spec.Kind)}
-
-	work, err := spec.Build()
-	if err != nil {
-		return err
+func (e *Executor) runStep(ctx context.Context, migration plan.Migration, spec plan.Step,
+	work step.Step, summary *Summary) (err error) {
+	run := &stepRun{
+		spec:    spec,
+		work:    work,
+		key:     ledger.StepKey{MigrationID: migration.ID, Index: spec.Index},
+		result:  StepResult{Name: spec.Name, Kind: string(spec.Kind)},
+		started: time.Now(),
 	}
 
 	conn, err := e.connect(ctx, migration, spec)
@@ -59,33 +68,148 @@ func (e *Executor) runStep(ctx context.Context, migration plan.Migration,
 		return err
 	}
 
+	run.conn = conn
+
 	// A connection that will not go back to the pool is reported: it may still
 	// be holding the locks the next step needs.
 	defer func() {
 		if closeErr := conn.Close(); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("release connection for step %s: %w", key, closeErr))
+			err = errors.Join(err, fmt.Errorf("release connection for step %s: %w", run.key, closeErr))
 		}
 	}()
 
 	// The catalog first, unconditionally.
 	done, err := work.Satisfied(ctx, conn)
 	if err != nil {
-		return e.fail(ctx, key, fmt.Errorf("check whether step %q is satisfied: %w", spec.Name, err))
+		return e.fail(ctx, run.key, fmt.Errorf("check whether step %s is satisfied: %w", run.key, err))
 	}
 
 	if done {
-		result.Status = string(ledger.StatusSucceeded)
-		summary.skip(result, started)
-
-		return e.succeed(ctx, key)
+		return e.skip(ctx, run, summary)
 	}
 
-	repaired, err := e.reconcile(ctx, key, work, conn)
+	switch applier := work.(type) {
+	case step.TxStep:
+		return e.runTxStep(ctx, run, applier, summary)
+
+	case step.NoTxStep:
+		return e.runNoTxStep(ctx, run, applier, summary)
+
+	default:
+		return fmt.Errorf("step %s: %w", run.key, plan.ErrKindUnsupported)
+	}
+}
+
+// skip records a step whose work the catalog already shows as done.
+func (e *Executor) skip(ctx context.Context, run *stepRun, summary *Summary) error {
+	run.result.Status = string(ledger.StatusSucceeded)
+	summary.skip(run.result, run.started)
+
+	return e.succeed(ctx, run.key)
+}
+
+// runTxStep applies a step whose DDL and ledger row commit together.
+//
+// Nothing is written before the transaction, so a crash part-way through leaves
+// the ledger exactly as it was. That is the property the whole shape exists for,
+// and it is why this path needs neither a repair nor a postcondition check.
+func (e *Executor) runTxStep(ctx context.Context, run *stepRun,
+	work step.TxStep, summary *Summary) error {
+	// The one place the ledger is allowed to decide. A transactional step's row
+	// commits with its DDL, so "succeeded" cannot describe work that did not
+	// happen — which is exactly what makes trusting it safe here and nowhere
+	// else. Without it, a step whose SQL carries no inferable predicate would
+	// re-run on every invocation.
+	recorded, err := ledger.LoadStep(ctx, e.control, run.key)
+
+	switch {
+	case errors.Is(err, ledger.ErrNotRecorded):
+	case err != nil:
+		return err
+	case recorded.Status == ledger.StatusSucceeded:
+		run.result.Status = string(ledger.StatusSucceeded)
+		run.result.Attempts = recorded.Attempts
+		summary.skip(run.result, run.started)
+
+		return nil
+	}
+
+	attempt := func(ctx context.Context) error {
+		return e.commitTxStep(ctx, run, work)
+	}
+
+	if err := session.WithLockRetry(ctx, e.opts.Retry, attempt); err != nil {
+		return e.fail(ctx, run.key, err)
+	}
+
+	crash.At(crash.AfterCommit)
+
+	run.result.Status = string(ledger.StatusSucceeded)
+	summary.apply(run.result, run.started)
+
+	return nil
+}
+
+// commitTxStep runs one attempt at a transactional step.
+//
+// The order inside the transaction is the contract: the fence is asserted
+// first, the DDL runs, and the ledger row is written last, all before a single
+// commit. A refactor that moves the ledger write outside this function reopens
+// the window that transactional steps exist to avoid.
+func (e *Executor) commitTxStep(ctx context.Context, run *stepRun, work step.TxStep) (err error) {
+	tx, err := run.conn.BeginTx(ctx, ledger.TxOptions())
+	if err != nil {
+		return fmt.Errorf("begin transaction for step %s: %w", run.key, err)
+	}
+
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			err = errors.Join(err, fmt.Errorf("roll back step %s: %w", run.key, rollbackErr))
+		}
+	}()
+
+	if err := ledger.Guard(ctx, tx, e.opts.Fence); err != nil {
+		return err
+	}
+
+	crash.At(crash.BeforeApply)
+
+	if err := work.ApplyTx(ctx, tx); err != nil {
+		return err
+	}
+
+	crash.At(crash.InTransaction)
+
+	attempts, err := ledger.IncrementAttempts(ctx, tx, run.key)
 	if err != nil {
 		return err
 	}
 
-	result.Repaired = repaired
+	if err := ledger.SetStepStatus(ctx, tx, run.key, ledger.StatusSucceeded, ""); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit step %s: %w", run.key, err)
+	}
+
+	// Only once the commit has landed, since a rolled-back attempt leaves no
+	// trace and reporting it would overstate what the ledger holds.
+	run.result.Attempts = attempts
+
+	return nil
+}
+
+// runNoTxStep applies a step that cannot share a transaction with its ledger
+// row, and so must be reconciled instead of trusted.
+func (e *Executor) runNoTxStep(ctx context.Context, run *stepRun,
+	work step.NoTxStep, summary *Summary) error {
+	repaired, err := e.reconcile(ctx, run.key, work, run.conn)
+	if err != nil {
+		return err
+	}
+
+	run.result.Repaired = repaired
 
 	if repaired {
 		summary.Repaired++
@@ -93,34 +217,31 @@ func (e *Executor) runStep(ctx context.Context, migration plan.Migration,
 		// Clearing a partial state can complete the work outright: dropping an
 		// invalid index left by an interrupted DROP INDEX CONCURRENTLY is the
 		// whole of that step.
-		done, err := work.Satisfied(ctx, conn)
+		done, err := work.Satisfied(ctx, run.conn)
 		if err != nil {
-			return e.fail(ctx, key, fmt.Errorf("check step %q after repair: %w", spec.Name, err))
+			return e.fail(ctx, run.key, fmt.Errorf("check step %s after repair: %w", run.key, err))
 		}
 
 		if done {
-			result.Status = string(ledger.StatusSucceeded)
-			summary.skip(result, started)
-
-			return e.succeed(ctx, key)
+			return e.skip(ctx, run, summary)
 		}
 	}
 
-	attempts, err := e.beginAttempt(ctx, key)
+	attempts, err := e.beginAttempt(ctx, run.key)
 	if err != nil {
 		return err
 	}
 
-	result.Attempts = attempts
+	run.result.Attempts = attempts
 
-	if err := e.apply(ctx, key, work, conn); err != nil {
+	if err := e.apply(ctx, run.key, work, run.conn); err != nil {
 		return err
 	}
 
-	result.Status = string(ledger.StatusSucceeded)
-	summary.apply(result, started)
+	run.result.Status = string(ledger.StatusSucceeded)
+	summary.apply(run.result, run.started)
 
-	return e.succeed(ctx, key)
+	return e.succeed(ctx, run.key)
 }
 
 // connect pins a connection and configures it for the step.
@@ -212,17 +333,12 @@ func (e *Executor) beginAttempt(ctx context.Context, key ledger.StepKey) (int, e
 	return attempts, nil
 }
 
-// apply runs the step and verifies that it did what it claimed.
-func (e *Executor) apply(ctx context.Context, key ledger.StepKey, work step.Step, conn *sql.Conn) error {
-	notx, ok := work.(step.NoTxStep)
-	if !ok {
-		return fmt.Errorf("step %s: %w", key, plan.ErrKindUnsupported)
-	}
-
+// apply runs a non-transactional step and verifies that it did what it claimed.
+func (e *Executor) apply(ctx context.Context, key ledger.StepKey, work step.NoTxStep, conn *sql.Conn) error {
 	crash.At(crash.BeforeApply)
 
 	run := func(ctx context.Context) error {
-		return notx.Apply(ctx, conn)
+		return work.Apply(ctx, conn)
 	}
 
 	if err := session.WithLockRetry(ctx, e.opts.Retry, run); err != nil {

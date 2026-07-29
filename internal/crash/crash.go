@@ -44,7 +44,10 @@ const (
 	// BeforeStepRunning fires with the ledger claiming work that never started.
 	BeforeStepRunning = "before_step_running"
 
-	// BeforeApply fires with the step marked running and no DDL issued.
+	// BeforeApply fires with no DDL issued. What has been recorded by then
+	// depends on the kind of step: a non-transactional one is already marked
+	// running, while a transactional one has written nothing and is inside the
+	// transaction that will carry both its DDL and its ledger row.
 	BeforeApply = "before_apply"
 
 	// AfterApply fires with the DDL committed and the ledger still saying
@@ -55,6 +58,14 @@ const (
 	// DuringRepair fires part-way through clearing a partial state, since the
 	// recovery path is code too and can itself be killed.
 	DuringRepair = "during_repair"
+
+	// InTransaction fires with a transactional step's DDL applied and nothing
+	// committed. Everything must roll back, including the ledger row.
+	InTransaction = "in_transaction"
+
+	// AfterCommit fires once a transactional step's DDL and its ledger row have
+	// committed together.
+	AfterCommit = "after_commit"
 )
 
 // At terminates the process when point is the armed crash point, and does
@@ -69,4 +80,22 @@ func At(point string) {
 	}
 
 	_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+}
+
+// Points lists every named crash point.
+//
+// Tests enumerate it so that adding a point without wiring it up, or reusing a
+// name at two sites, is caught rather than quietly weakening a matrix row.
+func Points() []string {
+	return []string{
+		BeforeLeaseAcquire,
+		AfterLeaseAcquire,
+		BeforeLeaseRelease,
+		BeforeStepRunning,
+		BeforeApply,
+		AfterApply,
+		DuringRepair,
+		InTransaction,
+		AfterCommit,
+	}
 }

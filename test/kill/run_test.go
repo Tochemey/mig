@@ -36,34 +36,50 @@ import (
 	"github.com/tochemey/mig/internal/catalog"
 	"github.com/tochemey/mig/internal/crash"
 	"github.com/tochemey/mig/internal/exec"
+	"github.com/tochemey/mig/internal/ledger"
 	"github.com/tochemey/mig/test/harness"
 )
 
-const (
-	// indexName is the index the migration under test builds.
-	indexName = "idx_users_legacy_email"
+// indexName is the index the non-transactional migration builds.
+const indexName = "idx_users_legacy_email"
 
-	// migrationBody is a single non-transactional step, which is the case with
-	// no atomic solution: the DDL cannot share a transaction with its ledger
-	// write.
-	migrationBody = `-- +mig step: index_legacy_email
+// fixture is a migration the recovery tests drive.
+type fixture struct {
+	// file is named for the timestamp the format requires.
+	file string
+	body string
+}
+
+// indexFixture is a non-transactional step: the case with no atomic solution,
+// where the DDL cannot share a transaction with its ledger write.
+var indexFixture = fixture{
+	file: "20240817120000_index_legacy_email.sql",
+	body: `-- +mig step: index_legacy_email
 -- +mig notx
 CREATE INDEX CONCURRENTLY ` + indexName + ` ON users (legacy_email);
-`
+`,
+}
 
-	// migrationFile is named for the timestamp the format requires.
-	migrationFile = "20240817120000_index_legacy_email.sql"
-)
+// columnFixture is a transactional step, which should prove the opposite
+// property: the DDL and its ledger row commit together, so the window does not
+// exist.
+var columnFixture = fixture{
+	file: "20240817120000_add_email.sql",
+	body: `-- +mig step: add_email
+ALTER TABLE users ADD COLUMN email text;
+`,
+}
 
-// run drives one database through the migration.
+// run drives one database through a migration.
 type run struct {
 	t        *testing.T
 	database string
 	dir      string
+	fixture  fixture
 }
 
 // newRun gives the test its own database and migration directory.
-func newRun(t *testing.T) *run {
+func newRun(t *testing.T, f fixture) *run {
 	t.Helper()
 
 	if shared == nil {
@@ -72,11 +88,11 @@ func newRun(t *testing.T) *run {
 
 	dir := t.TempDir()
 
-	if err := os.WriteFile(filepath.Join(dir, migrationFile), []byte(migrationBody), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, f.file), []byte(f.body), 0o600); err != nil {
 		t.Fatalf("write migration: %v", err)
 	}
 
-	return &run{t: t, database: newDatabase(t), dir: dir}
+	return &run{t: t, database: newDatabase(t), dir: dir, fixture: f}
 }
 
 // start spawns the migrator, arming a crash point when one is given.
@@ -292,7 +308,7 @@ func (r *run) assertMatchesGolden() {
 	r.t.Helper()
 
 	ctx := r.t.Context()
-	want := golden(r.t)
+	want := golden(r.t, r.fixture)
 
 	r.withDB(func(db *sql.DB) {
 		problems, err := harness.Problems(ctx, db)
@@ -378,37 +394,84 @@ func (r *run) withDB(fn func(*sql.DB)) {
 	fn(db)
 }
 
-// golden captures the state of an uninterrupted run, once, and reuses it.
-func golden(t *testing.T) harness.State {
+// golden captures the state an uninterrupted run leaves, once per migration,
+// and reuses it as the answer every interrupted run has to arrive at.
+func golden(t *testing.T, f fixture) harness.State {
 	t.Helper()
 
-	goldenOnce.Do(func() {
-		env := &run{t: t, database: newGoldenDatabase(), dir: t.TempDir()}
+	goldenMu.Lock()
+	defer goldenMu.Unlock()
 
-		if err := os.WriteFile(filepath.Join(env.dir, migrationFile), []byte(migrationBody), 0o600); err != nil {
-			t.Fatalf("write golden migration: %v", err)
+	if state, ok := goldenStates[f.file]; ok {
+		return state
+	}
+
+	env := &run{t: t, database: newGoldenDatabase(), dir: t.TempDir(), fixture: f}
+
+	if err := os.WriteFile(filepath.Join(env.dir, f.file), []byte(f.body), 0o600); err != nil {
+		t.Fatalf("write golden migration: %v", err)
+	}
+
+	env.run()
+
+	db, err := shared.Open(context.Background(), env.database)
+	if err != nil {
+		t.Fatalf("open golden database: %v", err)
+	}
+
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close golden database: %v", err)
 		}
+	}()
 
-		env.run()
+	state, err := harness.Capture(context.Background(), db)
+	if err != nil {
+		t.Fatalf("capture golden state: %v", err)
+	}
 
-		db, err := shared.Open(context.Background(), env.database)
+	goldenStates[f.file] = state
+
+	return state
+}
+
+// recordedStep reads a step's ledger row.
+func (r *run) recordedStep(index int) ledger.Step {
+	r.t.Helper()
+
+	var recorded ledger.Step
+
+	r.withDB(func(db *sql.DB) {
+		key := ledger.StepKey{MigrationID: strings.TrimSuffix(r.fixture.file, ".sql"), Index: index}
+
+		loaded, err := ledger.LoadStep(r.t.Context(), db, key)
 		if err != nil {
-			t.Fatalf("open golden database: %v", err)
+			r.t.Fatalf("load step %s: %v", key, err)
 		}
 
-		defer func() {
-			_ = db.Close()
-		}()
-
-		state, err := harness.Capture(context.Background(), db)
-		if err != nil {
-			t.Fatalf("capture golden state: %v", err)
-		}
-
-		goldenState = state
+		recorded = loaded
 	})
 
-	return goldenState
+	return recorded
+}
+
+// hasColumn reports whether a column exists on the fixture table.
+func (r *run) hasColumn(name string) bool {
+	r.t.Helper()
+
+	var exists bool
+
+	r.withDB(func(db *sql.DB) {
+		const query = `SELECT exists(
+            SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'users' AND column_name = $1)`
+
+		if err := db.QueryRowContext(r.t.Context(), query, name).Scan(&exists); err != nil {
+			r.t.Fatalf("check for column %q: %v", name, err)
+		}
+	})
+
+	return exists
 }
 
 // newGoldenDatabase clones a database that outlives the test that created it,
