@@ -40,6 +40,21 @@ const (
 	BeforeLeaseAcquire = "before_lease_acquire"
 	AfterLeaseAcquire  = "after_lease_acquire"
 	BeforeLeaseRelease = "before_lease_release"
+
+	// BeforeStepRunning fires with the ledger claiming work that never started.
+	BeforeStepRunning = "before_step_running"
+
+	// BeforeApply fires with the step marked running and no DDL issued.
+	BeforeApply = "before_apply"
+
+	// AfterApply fires with the DDL committed and the ledger still saying
+	// running. No transaction can close this window, which is why the catalog
+	// rather than the ledger decides whether work remains.
+	AfterApply = "after_apply"
+
+	// DuringRepair fires part-way through clearing a partial state, since the
+	// recovery path is code too and can itself be killed.
+	DuringRepair = "during_repair"
 )
 
 // At terminates the process when point is the armed crash point, and does

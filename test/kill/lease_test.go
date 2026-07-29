@@ -31,6 +31,7 @@ import (
 	"database/sql"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,29 +40,49 @@ import (
 	"github.com/tochemey/mig/test/leaser"
 )
 
-const leaserPkg = "github.com/tochemey/mig/test/leaser/cmd/leaser"
+const (
+	leaserPkg = "github.com/tochemey/mig/test/leaser/cmd/leaser"
+	migPkg    = "github.com/tochemey/mig/cmd/mig"
+)
 
 var (
 	// shared is the container for this package, or nil when docker is absent.
 	shared *harness.Harness
 
-	// leaserBin is the compiled runner these tests spawn.
+	// leaserBin exercises the lease on its own, without a plan to apply.
 	leaserBin string
+
+	// migBin is the migrator itself.
+	migBin string
+
+	// goldenState is the result of an uninterrupted run, captured once and
+	// compared against by every recovery test.
+	goldenState harness.State
+	goldenOnce  sync.Once
 )
 
-// TestMain brings up one container and builds the runner.
+// TestMain brings up one container and builds the binaries these tests spawn.
 func TestMain(m *testing.M) {
-	os.Exit(harness.Main(m, 0, func(ctx context.Context, h *harness.Harness) error {
-		bin, err := harness.Build(ctx, h.BinDir(), leaserPkg)
+	os.Exit(harness.Main(m, templateRows, func(ctx context.Context, h *harness.Harness) error {
+		leaser, err := harness.Build(ctx, h.BinDir(), leaserPkg)
 		if err != nil {
 			return err
 		}
 
-		shared, leaserBin = h, bin
+		mig, err := harness.Build(ctx, h.BinDir(), migPkg)
+		if err != nil {
+			return err
+		}
+
+		shared, leaserBin, migBin = h, leaser, mig
 
 		return nil
 	}))
 }
+
+// templateRows is enough rows that a concurrent index build takes long enough
+// to be killed part-way through, and few enough to keep the suite quick.
+const templateRows = 100_000
 
 // TestL1ExactlyOneRunnerApplies covers --on-locked=fail: several runners start
 // together, exactly one gets in, and the others exit cleanly.

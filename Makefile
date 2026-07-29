@@ -1,4 +1,4 @@
-.PHONY: build vet lint test cover cover-html clean
+.PHONY: build vet lint test cover cover-summary cover-html clean
 
 MODULE   := github.com/tochemey/mig
 COVERDIR := .cover
@@ -31,9 +31,10 @@ cover:
 	head -1 $(COVERDIR)/parent.out > $(PROFILE)
 	tail -n +2 -q $(COVERDIR)/parent.out $(COVERDIR)/children.out >> $(PROFILE)
 	go tool cover -func=$(PROFILE) | tail -1
-	@echo
-	@echo "Below 100%:"
-	@go tool cover -func=$(PROFILE) | grep -v '100.0%$$' | grep -v '^total:' || echo "  none"
+
+# Markdown, for a pull request summary or a terminal.
+cover-summary:
+	@./scripts/coverage-summary.sh $(PROFILE) $(MODULE)
 
 cover-html: cover
 	go tool cover -html=$(PROFILE)

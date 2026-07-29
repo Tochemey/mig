@@ -1,0 +1,92 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: UTC
+  CGO_ENABLED: "1" # pg_query_go links the Postgres parser
+  GOTOOLCHAIN: local # never auto-upgrade the toolchain mid-run
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache-dependency-path: go.sum
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          args: --timeout 10m --config .golangci.yml
+
+  test:
+    name: Test and coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache-dependency-path: go.sum
+
+      - run: go version
+      - run: go mod download
+      - run: go build ./...
+
+      # The suite spawns the migrator as a real process and kills it, so the
+      # runner needs a working docker daemon for testcontainers. Pulling ahead
+      # of time keeps the first container's startup timeout honest.
+      - name: Pull the Postgres image
+        run: docker pull postgres:17-alpine
+
+      - name: Test with coverage
+        run: make cover
+
+      - name: Publish the coverage summary
+        if: always()
+        run: make cover-summary >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: coverage-profile
+          path: .cover/coverage.out
+          if-no-files-found: warn
+
+  race:
+    name: Race detector
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache-dependency-path: go.sum
+
+      - run: go mod download
+      - name: Pull the Postgres image
+        run: docker pull postgres:17-alpine
+      - run: make test

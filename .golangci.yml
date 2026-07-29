@@ -84,6 +84,20 @@ linters:
         - materialisation
         - serialisation
         - recognisable
+        - recognise
+        - recognised
+        - recognises
+        - recognising
+        # honour
+        - honour
+        - honoured
+        - honours
+        - honouring
+        # randomise
+        - randomise
+        - randomised
+        - randomises
+        - randomising
         # amortise
         - amortise
         - amortised
