@@ -1,0 +1,26 @@
+.DS_Store
+Thumbs.db
+
+.tools/
+.idea/
+.vscode/
+*.iml
+*.so
+*coverage.*
+vendor
+gen.env
+.env
+gen/
+/.fleet/settings.json
+bench/*.txt
+.trunk/
+.gocache/
+.cache/
+.gomodcache/
+.claude/
+
+# go test compiled binaries left by `go test -c` / `-cpuprofile`
+*.test
+*.prof
+.local/
+.cover/
