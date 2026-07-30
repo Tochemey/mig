@@ -58,7 +58,7 @@ jobs:
       # runner needs a working docker daemon for testcontainers. Pulling ahead
       # of time keeps the first container's startup timeout honest.
       - name: Pull the Postgres image
-        run: docker pull postgres:17-alpine
+        run: docker pull postgres:18-alpine
 
       - name: Test with coverage
         run: make cover
@@ -95,5 +95,32 @@ jobs:
 
       - run: go mod download
       - name: Pull the Postgres image
-        run: docker pull postgres:17-alpine
+        run: docker pull postgres:18-alpine
       - run: make test
+
+  # Recovery behaviour for a concurrently-built index is version-sensitive, so
+  # the matrices have to pass on more than the one major the harness defaults
+  # to. This job runs them against the previous one.
+  postgres-matrix:
+    name: Recovery matrix on Postgres ${{ matrix.postgres }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["17", "18"]
+    env:
+      MIG_PG_IMAGE: postgres:${{ matrix.postgres }}-alpine
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache-dependency-path: go.sum
+
+      - run: go mod download
+      - name: Pull the Postgres image
+        run: docker pull "$MIG_PG_IMAGE"
+      - name: Recovery and lease matrices
+        run: go test ./test/... ./internal/lease/... ./internal/step/... -count=1 -timeout 30m

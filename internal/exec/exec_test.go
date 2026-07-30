@@ -28,7 +28,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -141,6 +143,117 @@ func TestRunReportsEveryFailedWrite(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRunLogsEveryStepTransition covers the records the progress display is
+// built from. Every step gets a closing record whatever happened to it, work
+// is announced only when there is work, and the numbering counts the whole
+// plan rather than the steps this run touched.
+func TestRunLogsEveryStepTransition(t *testing.T) {
+	database := newDatabase(t)
+	db := openPlain(t, database)
+
+	first := &recording{}
+
+	if _, err := runWith(t, database, db, loadPlan(t), func(o *exec.Options) {
+		o.Log = slog.New(first)
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if got := first.count("step running"); got != 3 {
+		t.Fatalf("the first run announced %d steps, want 3", got)
+	}
+
+	done := first.byMessage("step done")
+	if len(done) != 3 {
+		t.Fatalf("the first run closed %d steps, want 3: %v", len(done), done)
+	}
+
+	for i, record := range done {
+		if record["position"] != int64(i+1) || record["total"] != int64(3) {
+			t.Fatalf("record %d is numbered %v/%v, want %d/3",
+				i, record["position"], record["total"], i+1)
+		}
+
+		if record["status"] != "succeeded" {
+			t.Fatalf("record %d has status %q, want succeeded", i, record["status"])
+		}
+	}
+
+	// The second run finds everything present: no announcements, and every
+	// closing record says skipped.
+	second := &recording{}
+
+	if _, err := runWith(t, database, db, loadPlan(t), func(o *exec.Options) {
+		o.Log = slog.New(second)
+	}); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+
+	if got := second.count("step running"); got != 0 {
+		t.Fatalf("the second run announced %d steps, want none", got)
+	}
+
+	for i, record := range second.byMessage("step done") {
+		if record["status"] != "skipped" {
+			t.Fatalf("second-run record %d has status %q, want skipped", i, record["status"])
+		}
+	}
+}
+
+// recording collects the executor's log records for assertions.
+type recording struct {
+	mu      sync.Mutex
+	records []map[string]any
+}
+
+// Enabled admits everything.
+func (r *recording) Enabled(context.Context, slog.Level) bool { return true }
+
+// WithAttrs is required by the interface and unused by the executor.
+func (r *recording) WithAttrs([]slog.Attr) slog.Handler { return r }
+
+// WithGroup is required by the interface and unused by the executor.
+func (r *recording) WithGroup(string) slog.Handler { return r }
+
+// Handle stores one record as a map, with its message under "msg".
+func (r *recording) Handle(_ context.Context, rec slog.Record) error {
+	entry := map[string]any{"msg": rec.Message}
+
+	rec.Attrs(func(a slog.Attr) bool {
+		entry[a.Key] = a.Value.Resolve().Any()
+
+		return true
+	})
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.records = append(r.records, entry)
+
+	return nil
+}
+
+// count reports how many records carry the message.
+func (r *recording) count(msg string) int {
+	return len(r.byMessage(msg))
+}
+
+// byMessage returns the records carrying the message, in order.
+func (r *recording) byMessage(msg string) []map[string]any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var matched []map[string]any
+
+	for _, record := range r.records {
+		if record["msg"] == msg {
+			matched = append(matched, record)
+		}
+	}
+
+	return matched
 }
 
 // TestRunRefusesAnUnbuildableStepBeforeApplyingAnything is the plan-time

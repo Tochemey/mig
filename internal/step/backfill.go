@@ -98,6 +98,10 @@ type Env struct {
 
 	// Report receives a line per batch, for an operator watching progress.
 	Report func(cursor Cursor)
+
+	// Resume, when not nil, is told once that an earlier run left a checkpoint
+	// and where it points, before the first batch runs.
+	Resume func(cursor Cursor)
 }
 
 // ResumableStep runs long and records its progress as it goes.
@@ -169,6 +173,9 @@ func (s *Backfill) boundsQuery() string {
 // it, and resuming from wherever an earlier run stopped.
 func (s *Backfill) Run(ctx context.Context, env Env) error {
 	cursor, resumed, err := s.resume(ctx, env)
+	if err == nil && resumed && env.Resume != nil {
+		env.Resume(cursor)
+	}
 	if err != nil {
 		return err
 	}

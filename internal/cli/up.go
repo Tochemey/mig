@@ -176,13 +176,15 @@ func emit(stdout io.Writer, summary mig.Summary) error {
 	return nil
 }
 
-// logger builds the structured logger. Logs go to stderr so that stdout
-// carries only the summary.
+// logger builds what a run reports to stderr, so that stdout carries only the
+// machine-readable summary.
+//
+// The default is the display a person watches. --verbose replaces it with
+// structured JSON carrying the same records, for a log pipeline.
 func logger(stderr io.Writer, verbose bool) *slog.Logger {
-	level := slog.LevelWarn
 	if verbose {
-		level = slog.LevelInfo
+		return slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 
-	return slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: level}))
+	return slog.New(newRenderer(stderr))
 }

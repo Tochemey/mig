@@ -12,6 +12,8 @@ Kill a migration part way through, with SIGKILL, a pod eviction or a lost node, 
 
 Before running a step, mig asks Postgres whether the work is already present. It does not rely on its own record of what ran. The catalog is the source of truth and the ledger is advisory.
 
+It is one engine in two forms: a command line tool, for running migrations as a job, and a Go library, [pkg/mig](pkg/mig), for services that embed their migrations and verify them at startup. Every command is a thin wrapper over the library, so the two cannot drift apart.
+
 ## Contents
 
 - [Why](#why)
@@ -19,18 +21,19 @@ Before running a step, mig asks Postgres whether the work is already present. It
 - [Quick start](#quick-start)
 - [How it recovers](#how-it-recovers)
 - [Migration format](#migration-format)
+  - [Step kinds](#step-kinds)
   - [Inferred conditions](#inferred-conditions)
   - [Backfills](#backfills)
-- [Commands](#commands)
+- [The command line](#the-command-line)
   - [Configuration](#configuration)
   - [Exit codes](#exit-codes)
+- [As a library](#as-a-library)
 - [Deploying](#deploying)
-- [Library](#library)
 - [Adopting an existing history](#adopting-an-existing-history)
+  - [From goose](#from-goose)
+  - [From golang-migrate](#from-golang-migrate)
 - [Limitations](#limitations)
-- [Development](#development)
 - [Contributing](#contributing)
-- [License](#license)
 
 ## Why
 
@@ -42,21 +45,35 @@ Reading the catalog answers this without ambiguity: the index exists, it is not 
 
 ## Install
 
+The command line tool:
+
 ```sh
 go install github.com/tochemey/mig/cmd/mig@latest
 ```
 
-cgo is required. mig parses SQL with the real Postgres grammar through [pg_query_go](https://github.com/pganalyze/pg_query_go) instead of regular expressions, so quoted identifiers, embedded comments, partial indexes and multi-line statements are read the way the server reads them.
+The library:
+
+```sh
+go get github.com/tochemey/mig
+```
+
+Requirements for both:
+
+- Go 1.26 or later, with cgo enabled. mig parses SQL with the real Postgres grammar through [pg_query_go](https://github.com/pganalyze/pg_query_go) instead of regular expressions, so quoted identifiers, embedded comments, partial indexes and multi-line statements are read the way the server reads them.
+- Postgres. The test matrices run against 17 and 18 on every change.
 
 ## Quick start
 
-Write a migration in `migrations/`:
+Write a migration in `migrations/`. This one is complete, so it runs against an empty database:
 
 ```sql
--- migrations/20240817120000_add_email.sql
+-- migrations/20240817120000_create_users.sql
 
--- +mig step: add_column
-ALTER TABLE users ADD COLUMN email text;
+-- +mig step: create_users
+CREATE TABLE users (
+    id    bigint PRIMARY KEY,
+    email text
+);
 
 -- +mig step: index_email
 -- +mig notx
@@ -70,9 +87,9 @@ mig plan --dir migrations
 ```
 
 ```
-20240817120000_add_email
-  0  add_column   ddl_tx    column users.email exists
-  1  index_email  ddl_notx  index idx_users_email exists and is valid and ready
+20240817120000_create_users
+  0  create_users  ddl_tx    relation users exists
+  1  index_email   ddl_notx  index idx_users_email exists and is valid and ready
 ```
 
 Apply it:
@@ -81,9 +98,44 @@ Apply it:
 mig up --dsn "$DATABASE_URL" --dir migrations
 ```
 
-Kill the run and start it again. The second run skips what is already present and does the rest.
+```
+  [1/2] create_users   ✓ 14ms
+  [2/2] index_email   ✓ 10ms
+{"migrations":1,"steps_total":2,"applied":2,"skipped":0,"repaired":0,"duration_ms":31,"steps":[...]}
+```
+
+The step lines are the progress display, on stderr; on a terminal the running step animates in place with its elapsed time. The JSON line is the summary, on stdout, for a pipeline to parse.
+
+Run it again, or kill the first run part way through and then run it again. Either way the next run does only what is missing, and a run with nothing to do displays nothing:
+
+```json
+{"migrations":1,"steps_total":2,"applied":0,"skipped":2,"repaired":0,"duration_ms":14,"steps":[...]}
+```
 
 ## How it recovers
+
+Two words carry the design, and this README uses them throughout:
+
+- The **catalog** is Postgres's own account of what exists: `pg_class`, `pg_index`, `pg_attribute` and the rest of the system tables. An index or a column is real exactly when the catalog says it is.
+- The **ledger** is mig's own bookkeeping: a schema named `mig`, created on the first run, holding each step's attempts, status and checkpoint, plus the lease. It records what mig did, which is not the same as what is true.
+
+When the two disagree, the catalog wins. The ledger advises: it says where to look and what may need repair, and only one narrow case trusts it outright.
+
+This is what that looks like. Kill a run during a concurrent index build, then run it again:
+
+```
+  [1/2] index_legacy_email
+      found invalid index, dropping and rebuilding
+      ✓ 2.5s
+```
+
+Kill it again during the backfill that follows, and the third run picks up at the last committed batch:
+
+```
+  [2/2] fill_email
+      resuming from id=138,000
+      ✓ 13s
+```
 
 Every step goes through the same sequence, whatever happened before it:
 
@@ -103,13 +155,23 @@ Migrations are hand-written SQL files named `<version>_<name>.sql` and applied i
 
 Annotations are SQL comments, so a migration file is still valid SQL:
 
-| Annotation                                                    | Effect                                                                                         |
-|---------------------------------------------------------------|------------------------------------------------------------------------------------------------|
-| `-- +mig step: <name>`                                        | Starts a step. SQL before the first one becomes a step named `step_1`.                         |
-| `-- +mig notx`                                                | Run outside a transaction, for `CREATE INDEX CONCURRENTLY`, `VALIDATE CONSTRAINT` and similar. |
-| `-- +mig backfill: table=T key=K [batch=N] [max_lag_bytes=N]` | A resumable, batched data change.                                                              |
-| `-- +mig satisfied: sql(<expr>)`                              | Supply the done-condition yourself when it cannot be inferred.                                 |
-| `-- +mig no_lock_timeout`                                     | Drop the default `lock_timeout` for this step.                                                 |
+| Annotation                                                    | Effect                                                                                                      |
+|---------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------|
+| `-- +mig step: <name>`                                        | Starts a step. SQL before the first one becomes a step named `step_1`.                                      |
+| `-- +mig notx`                                                | Run outside a transaction, for `CREATE INDEX CONCURRENTLY`, `VALIDATE CONSTRAINT` and similar.              |
+| `-- +mig backfill: table=T key=K [batch=N] [max_lag_bytes=N]` | A resumable, batched data change.                                                                           |
+| `-- +mig satisfied: sql(<expr>)`                              | Supply the done-condition yourself when it cannot be inferred. The expression must return a single boolean. |
+| `-- +mig no_lock_timeout`                                     | Drop the default `lock_timeout` for this step.                                                              |
+
+### Step kinds
+
+Every step runs as one of three kinds. The names appear in `mig plan`, in the summary's `kind` field and in `mig status`:
+
+| Kind       | How a step gets it          | What it means                                                                                                                                                                |
+|------------|-----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ddl_tx`   | The default.                | Runs inside a transaction, and its ledger row commits in that same transaction. An interrupted attempt rolls back whole, so there is never anything to reconcile.            |
+| `ddl_notx` | The `notx` annotation.      | Runs outside a transaction, for the statements Postgres refuses inside one. Judged against the catalog, and repaired first when an earlier attempt left partial work behind. |
+| `backfill` | The `backfill:` annotation. | A batched data change. Each batch commits together with its cursor, so an interrupted run resumes from the last committed batch.                                             |
 
 ### Inferred conditions
 
@@ -140,6 +202,8 @@ UPDATE users SET email = legacy_email
  WHERE id > :cursor_lo AND id <= :cursor_hi AND email IS NULL;
 ```
 
+mig substitutes `:cursor_lo` and `:cursor_hi` with each batch's key range. The low bound is exclusive and the high bound inclusive, so write the predicate as `key > :cursor_lo AND key <= :cursor_hi` and consecutive batches cannot overlap.
+
 Each batch commits with the cursor that covers it, in one transaction. The rows and the cursor cannot land separately.
 
 Pagination is by key range only. `OFFSET` rescans every row it skips, so its cost grows with the square of the table, and it misses rows when concurrent writes shift what it counts past.
@@ -148,7 +212,7 @@ Batch size adapts. It halves when replication lag passes `max_lag_bytes` or a ba
 
 A backfill requires `satisfied:`. Its cursor lives in the ledger, and the ledger does not decide whether work remains.
 
-## Commands
+## The command line
 
 | Command           | What it does                                                                           |
 |-------------------|----------------------------------------------------------------------------------------|
@@ -172,7 +236,7 @@ Every setting is a flag. Three of them also read an environment variable, which 
 | `--lease-ttl`   | `MIG_LEASE_TTL` | `30s`        | `up`, `import`                                    | How long the lease stays valid without a heartbeat. A value that does not parse as a Go duration is ignored and the default is used, so a typo cannot shorten a lease into one that expires mid-migration. |
 | `--on-locked`   | none            | `wait`       | `up`                                              | `wait` blocks until the lease is free. `fail` exits with code 4 straight away.                                                                                                                             |
 | `--allow-drift` | none            | `false`      | `up`                                              | Continue when a migration was edited after it was applied. Without it, a checksum mismatch on a succeeded step stops the run.                                                                              |
-| `--verbose`     | none            | `false`      | `up`                                              | Log every step transition to stderr.                                                                                                                                                                       |
+| `--verbose`     | none            | `false`      | `up`                                              | Structured JSON logs on stderr instead of the progress display, carrying the same records.                                                                                                                 |
 | `--from`        | none            | none         | `import`                                          | Source history to adopt: `goose` or `golang-migrate`. Required.                                                                                                                                            |
 | `--json`        | none            | `false`      | `status`                                          | Emit the report as JSON instead of a table.                                                                                                                                                                |
 | `--describe`    | none            | `false`      | `fingerprint`                                     | Print the rows behind the digest instead of the digest.                                                                                                                                                    |
@@ -200,29 +264,9 @@ A scheduler needs to tell another runner holding the lease apart from a failed m
 | `3`  | Work outstanding. `verify` only. |
 | `4`  | Another runner holds the lease.  |
 
-`mig up` writes a machine-readable summary to stdout and structured logs to stderr, so the two do not interleave:
+`mig up` writes its machine-readable summary to stdout and the progress display to stderr, so a pipeline can parse one without filtering out the other. `--verbose` swaps the display for structured JSON logs.
 
-```json
-{"migrations":1,"steps_total":2,"applied":1,"skipped":1,"repaired":0,"duration_ms":412,"steps":[]}
-```
-
-## Deploying
-
-Run `mig up` as a job. Call `Verify` when the service starts.
-
-```sh
-mig up --dsn "$DATABASE_URL" --dir migrations
-```
-
-```go
-if err := mig.Verify(ctx, db, migrations); err != nil {
-    log.Fatal("migrations pending; refusing to start", "err", err)
-}
-```
-
-Applying migrations on service boot has two problems. Every replica races to do the same work and none of them is elected to do it, and a migration that takes minutes delays the readiness probe. `Verify` takes no lease and writes nothing, so every replica can call it at once.
-
-## Library
+## As a library
 
 Everything the binary does is available in [pkg/mig](pkg/mig), so a program can migrate without running the binary, and a service can embed its migrations instead of shipping a directory next to it:
 
@@ -248,7 +292,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
         return err
     }
 
-    log.Info("migrated", "applied", summary.Applied, "skipped", summary.Skipped)
+    log.Printf("migrated: applied=%d skipped=%d", summary.Applied, summary.Skipped)
 
     return nil
 }
@@ -268,9 +312,38 @@ Sentinel errors: `ErrPending`, `ErrLocked`, `ErrFenced`, `ErrChecksumDrift` and 
 
 `Options` works as its zero value. `TTL` defaults to `DefaultTTL`, `OnLocked` to `Wait`, and `Work` to the pool passed in.
 
+## Deploying
+
+Run `mig up` as a job. Call `Verify` when the service starts.
+
+```sh
+mig up --dsn "$DATABASE_URL" --dir migrations
+```
+
+```go
+// migrations is an fs.FS, such as the embedded directory shown above.
+if err := mig.Verify(ctx, db, migrations); err != nil {
+    log.Fatalf("migrations pending; refusing to start: %v", err)
+}
+```
+
+Applying migrations on service boot has two problems. Every replica races to do the same work and none of them is elected to do it, and a migration that takes minutes delays the readiness probe. `Verify` takes no lease and writes nothing, so every replica can call it at once.
+
 ## Adopting an existing history
 
-Adoption does not require rewriting migrations. The files keep their names and their contents:
+For a project already on [goose](https://github.com/pressly/goose) or [golang-migrate](https://github.com/golang-migrate/migrate). The files stay where they are and keep their names and their contents. The only thing that changes is which tool runs them.
+
+The shape is the same for both: point mig at the existing directory, import the history once per database, and use `mig up` from then on. Existing files run unchanged, and new migrations can use steps, backfills and inferred conditions.
+
+Each line of the import report says what happens to one migration:
+
+- `adopted`: the old tool recorded it as applied, so it is marked succeeded in the ledger and will not run again.
+- `recheck`: the old tool has no record of it. The next run checks it against the catalog and applies whatever is missing, which is safe whether or not it actually ran.
+- `no file`: the history names a version with no file in the directory. It is reported rather than refused, since old files get deleted once every environment is past them.
+
+### From goose
+
+goose keeps one row per apply and per rollback in `goose_db_version`, so the applied set is known exactly, and a migration that was rolled back is correctly left outstanding.
 
 ```sh
 mig import --from goose --dsn "$DATABASE_URL" --dir migrations
@@ -283,33 +356,32 @@ adopted 2 migration(s) from goose
   recheck:  3_add_phone
 ```
 
-Every migration the other tool applied is recorded as succeeded, so it is not applied again. The rest is left to be checked against the catalog on the next run, which is safe whether or not it actually ran. Existing files then run unchanged, and new migrations can use steps, backfills and predicates.
+The next `mig up` skips the two adopted migrations and applies `3_add_phone`.
 
-A golang-migrate directory loads as it stands. The `.down.sql` files are skipped and the `.up` suffix is trimmed from the identifier. Its `dirty` flag is reported but not acted on. The version it names is left for the catalog to settle, instead of blocking deployments until someone clears the flag by hand.
+### From golang-migrate
+
+golang-migrate keeps a single high-water mark in `schema_migrations`: everything at or below it counts as applied. Its `.up.sql` and `.down.sql` pairs load as they stand, with the `.up` suffix trimmed from the identifier and the `.down.sql` files skipped.
+
+Its `dirty` flag marks a run that died mid-migration, and golang-migrate refuses to move until someone clears the flag by hand. mig reports the flag and leaves the version it names out of the adoption, so the catalog settles it instead:
+
+```sh
+mig import --from golang-migrate --dsn "$DATABASE_URL" --dir migrations
+```
+
+```
+adopted 1 migration(s) from golang-migrate
+  adopted:  1_create_users
+  recheck:  2_add_email
+  dirty:    2 left to reconcile against the catalog
+```
+
+Here version 2 was being applied when the run died. The next `mig up` checks what actually landed and applies only what is missing, with nobody clearing anything by hand.
 
 ## Limitations
 
 - **Down migrations are not run.** A rollback cannot reverse a destructive change, and running one against a schema that a failed `up` left half applied is guesswork. Re-running a converging `up` is the recovery path. A CI check that applies up, down and up again against a throwaway database and compares schema fingerprints is planned instead.
 - **Transaction poolers are refused.** Session state on a pooled handle is meaningless and every step needs a pinned connection. mig detects PgBouncer in transaction mode and stops, instead of working around it and failing later in a way that is hard to diagnose.
-- **Postgres only.** MySQL is not a target.
-
-## Development
-
-```sh
-make test           # full suite with the race detector
-make cover          # coverage, merged across parent and child processes
-make cover-summary  # the same as Markdown
-make lint
-```
-
-The suite runs the migrator as a real process and sends it SIGKILL at named points, so it needs a working Docker daemon for [testcontainers](https://golang.testcontainers.org/). Each test clones a seeded template database, which keeps the recovery matrices at seconds rather than minutes.
-
-Coverage comes from two sources. Parent test binaries report through `-coverprofile`. The migrator and the test fixtures only ever run as child processes, so they are built with `-cover` and report into `MIG_COVERDIR`. Counting only the first source would show the executor, the code the recovery tests exercise hardest, as untested.
 
 ## Contributing
 
-Fork, branch, and open a pull request. The project follows [Semantic Versioning](https://semver.org) and [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). [CONTRIBUTING.md](CONTRIBUTING.md) covers the commit format, the code conventions and what the tests expect.
-
-## License
-
-[MIT](LICENSE), Arsene Tochemey Gandote
+Fork, branch, and open a pull request. The project follows [Semantic Versioning](https://semver.org) and [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). [CONTRIBUTING.md](CONTRIBUTING.md) covers the development setup, the commit format, the code conventions and what the tests expect.

@@ -48,6 +48,11 @@ type stepRun struct {
 	conn    *sql.Conn
 	result  StepResult
 	started time.Time
+
+	// skipped separates "the catalog already showed the work" from "this run
+	// performed it", which the summary encodes in its counters and the closing
+	// record has to name directly.
+	skipped bool
 }
 
 // runStep converges one step.
@@ -56,7 +61,7 @@ type stepRun struct {
 // does the ledger get consulted, and only to decide whether a repair is needed
 // before the work is attempted again.
 func (e *Executor) runStep(ctx context.Context, migration plan.Migration, spec plan.Step,
-	work step.Step, summary *Summary) (err error) {
+	work step.Step, summary *Summary, prog *progress) (err error) {
 	run := &stepRun{
 		spec:    spec,
 		work:    work,
@@ -64,6 +69,22 @@ func (e *Executor) runStep(ctx context.Context, migration plan.Migration, spec p
 		result:  StepResult{Name: spec.Name, Kind: string(spec.Kind)},
 		started: time.Now(),
 	}
+
+	// Every step is numbered whether or not it runs, so the display counts
+	// [2/3] by what the plan holds rather than by what this run worked on.
+	prog.position++
+	position := prog.position
+
+	// One record per step whatever path it took, so the display and the JSON
+	// logs both account for everything the summary will list.
+	defer func() {
+		e.opts.Log.Info("step done",
+			"migration", migration.ID, "step", spec.Name, "kind", string(spec.Kind),
+			"position", position, "total", prog.total,
+			"status", doneStatus(run, err), "repaired", run.result.Repaired,
+			"attempts", run.result.Attempts,
+			"duration_ms", time.Since(run.started).Milliseconds())
+	}()
 
 	conn, err := e.connect(ctx, migration, spec)
 	if err != nil {
@@ -90,6 +111,12 @@ func (e *Executor) runStep(ctx context.Context, migration plan.Migration, spec p
 		return e.skip(ctx, run, summary)
 	}
 
+	// Announced only once the catalog has said there is work, so a converged
+	// database renders as silence rather than as a list of steps not run.
+	e.opts.Log.Info("step running",
+		"migration", migration.ID, "step", spec.Name, "kind", string(spec.Kind),
+		"position", position, "total", prog.total)
+
 	switch applier := work.(type) {
 	case step.TxStep:
 		return e.runTxStep(ctx, run, applier, summary)
@@ -105,8 +132,23 @@ func (e *Executor) runStep(ctx context.Context, migration plan.Migration, spec p
 	}
 }
 
+// doneStatus names a step's outcome for its closing record.
+func doneStatus(run *stepRun, err error) string {
+	switch {
+	case err != nil:
+		return "failed"
+
+	case run.skipped:
+		return "skipped"
+
+	default:
+		return run.result.Status
+	}
+}
+
 // skip records a step whose work the catalog already shows as done.
 func (e *Executor) skip(ctx context.Context, run *stepRun, summary *Summary) error {
+	run.skipped = true
 	run.result.Status = string(ledger.StatusSucceeded)
 	summary.skip(run.result, run.started)
 
@@ -132,6 +174,7 @@ func (e *Executor) runTxStep(ctx context.Context, run *stepRun,
 	case err != nil:
 		return err
 	case recorded.Status == ledger.StatusSucceeded:
+		run.skipped = true
 		run.result.Status = string(ledger.StatusSucceeded)
 		run.result.Attempts = recorded.Attempts
 		summary.skip(run.result, run.started)
@@ -304,7 +347,8 @@ func (e *Executor) reconcile(ctx context.Context, key ledger.StepKey, work step.
 		return false, nil
 	}
 
-	e.opts.Log.Info("repairing partial step", "step", key.String(), "attempts", recorded.Attempts)
+	e.opts.Log.Info("repairing partial step",
+		"step", key.String(), "kind", string(work.Meta().Kind), "attempts", recorded.Attempts)
 
 	if err := work.Repair(ctx, conn); err != nil {
 		return false, e.fail(ctx, key, fmt.Errorf("repair step %s: %w", key, err))
@@ -434,6 +478,10 @@ func (e *Executor) runResumableStep(ctx context.Context, run *stepRun,
 		}),
 		Report: func(cursor step.Cursor) {
 			e.opts.Log.Info("backfill progress",
+				"step", run.key.String(), "cursor", cursor.Position, "rows", cursor.Rows)
+		},
+		Resume: func(cursor step.Cursor) {
+			e.opts.Log.Info("backfill resuming",
 				"step", run.key.String(), "cursor", cursor.Position, "rows", cursor.Rows)
 		},
 	}

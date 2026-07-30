@@ -40,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 
@@ -51,7 +52,13 @@ import (
 // DefaultImage pins the Postgres major version. Recovery behaviour for
 // concurrently-built indexes is version-sensitive, so it is pinned rather than
 // floating; use [WithImage] to run against another major.
-const DefaultImage = "postgres:17-alpine"
+const DefaultImage = "postgres:18-alpine"
+
+// EnvImage overrides the image for a whole run, so the same suite can be run
+// against a second major without editing anything. A version-sensitive
+// behaviour that only holds on one of them is a bug either way, and finding it
+// requires running the matrices on both.
+const EnvImage = "MIG_PG_IMAGE"
 
 const (
 	// adminDatabase is the maintenance database. Creating, cloning and dropping
@@ -94,7 +101,7 @@ func WithImage(image string) Option {
 // One container serves a whole test package; per-test isolation comes from
 // [Harness.Clone].
 func New(ctx context.Context, opts ...Option) (*Harness, error) {
-	cfg := config{image: DefaultImage}
+	cfg := config{image: envOr(EnvImage, DefaultImage)}
 
 	for _, o := range opts {
 		o(&cfg)
@@ -159,6 +166,12 @@ func (h *Harness) DSN(database string) string {
 	return u.String()
 }
 
+// Endpoint is the host:port the container listens on, for a test that puts
+// something of its own between the runner and Postgres.
+func (h *Harness) Endpoint() string {
+	return h.base.Host
+}
+
 // Admin returns the maintenance connection, for inspecting the cluster rather
 // than a single database.
 func (h *Harness) Admin() *sql.DB {
@@ -204,6 +217,15 @@ func (h *Harness) abort(ctx context.Context, cause error) error {
 	}
 
 	return cause
+}
+
+// envOr reads name, falling back when it is unset.
+func envOr(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+
+	return fallback
 }
 
 // quoteIdent quotes a SQL identifier. Postgres does not accept bind parameters

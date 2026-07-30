@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tochemey/mig/internal/cli"
@@ -82,6 +83,53 @@ func TestUpReportsBeingLocked(t *testing.T) {
 
 	if code := cli.ExitCode(err); code != cli.ExitLocked {
 		t.Fatalf("exit code is %d, want %d", code, cli.ExitLocked)
+	}
+}
+
+// TestUpShowsItsProgress covers the display on stderr: the step that ran, its
+// mark and duration on the first run, and silence on the second, since a
+// converged database has nothing to show.
+func TestUpShowsItsProgress(t *testing.T) {
+	database := newDatabase(t)
+	dir := migrationDir(t)
+	dsn := shared.DSN(database)
+
+	_, stderr, err := run(t, "up", "--dsn", dsn, "--dir", dir)
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+
+	for _, want := range []string{"[1/1] add_email", "✓"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr %q does not show %q", stderr, want)
+		}
+	}
+
+	_, stderr, err = run(t, "up", "--dsn", dsn, "--dir", dir)
+	if err != nil {
+		t.Fatalf("second up: %v", err)
+	}
+
+	if stderr != "" {
+		t.Fatalf("a converged run still rendered %q", stderr)
+	}
+}
+
+// TestUpVerboseEmitsJSONLogs covers the switch a log pipeline uses: the same
+// records as the display, as structured JSON instead.
+func TestUpVerboseEmitsJSONLogs(t *testing.T) {
+	database := newDatabase(t)
+
+	_, stderr, err := run(t, "up", "--dsn", shared.DSN(database),
+		"--dir", migrationDir(t), "--verbose")
+	if err != nil {
+		t.Fatalf("up: %v", err)
+	}
+
+	for _, want := range []string{`"msg":"step running"`, `"msg":"step done"`, `"status":"succeeded"`} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr %q does not carry %q", stderr, want)
+		}
 	}
 }
 

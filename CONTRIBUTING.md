@@ -118,8 +118,23 @@ Three kinds of test exist, and a change usually needs the first:
 - **Package tests** run against a real Postgres in a container. Most of the suite.
 - **Recovery tests** in `test/kill` run the migrator as a child process and send it SIGKILL at named points in `internal/crash`. Add a crash point when you add a step kind that can be interrupted part way through.
 - **Fault injection** through `test/faultdb` fails a chosen statement inside the driver. Use it for the error branch of a database call, which no kill can reach because the process has to survive to report it.
+- **Partition tests** put `harness.Proxy` between the runner and Postgres and stop it delivering. Use it when the question is what a healthy process does with no route to the database, which is different from what a dead one does.
+
+`TestFuzzKillTimingConverges` kills at a random moment and prints the seed it used. If it fails, re-run with `MIG_FUZZ_SEED` set to that value to reproduce it, then pin the case into the named matrix rather than leaving it to another random run to find again.
 
 A test that asserts recovery ends with the same bundle: the schema and data fingerprint match an uninterrupted run, no invalid indexes, no unvalidated constraints, no lease left held, and a further run applies and repairs nothing.
+
+### Test environment
+
+Three environment variables steer the suite:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `MIG_PG_IMAGE` | `postgres:18-alpine` | Runs the suite against another Postgres major. Recovery behaviour for a concurrently-built index is version-sensitive, and CI runs the matrices on 17 and 18. |
+| `MIG_FUZZ_SEED` | random, printed | Replays a fuzz run with the same kill timings. |
+| `MIG_FUZZ_ITERATIONS` | `3` | How many random kills the fuzz makes. The nightly workflow raises it to 500. |
+
+Coverage comes from two sources. Parent test binaries report through `-coverprofile`. The migrator and the test fixtures only ever run as child processes, so they are built with `-cover` and report into `MIG_COVERDIR`; `make cover` merges the two. Counting only the first source would show the executor, the code the recovery tests exercise hardest, as untested.
 
 ## Changelog
 

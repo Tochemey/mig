@@ -167,7 +167,15 @@ func underLease(ctx context.Context, db *sql.DB, opts Options,
 
 	// A context of its own, so that a run cancelled part way through still
 	// hands the lease back instead of leaving it to expire.
-	releaseErr := held.Release(context.WithoutCancel(ctx))
+	//
+	// Bounded by the TTL, because the reason a run ends is sometimes that the
+	// database became unreachable. Waiting longer than the lease itself lasts
+	// achieves nothing: by then it has expired and a successor may take it.
+	// Without the bound the process hangs on a socket nobody will answer.
+	releaseCtx, cancelRelease := context.WithTimeout(context.WithoutCancel(ctx), ttl)
+	defer cancelRelease()
+
+	releaseErr := held.Release(releaseCtx)
 
 	return errors.Join(runErr, releaseErr)
 }

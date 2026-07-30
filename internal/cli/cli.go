@@ -152,7 +152,8 @@ func bindApply(cmd *cobra.Command, cfg *config) {
 	flags.DurationVar(&cfg.ttl, "lease-ttl", envDuration(EnvLeaseTTL, mig.DefaultTTL), "lease validity window")
 	flags.StringVar(&cfg.onLocked, "on-locked", string(mig.Wait), "wait or fail when another runner holds the lease")
 	flags.BoolVar(&cfg.drift, "allow-drift", false, "continue when an applied step's checksum has changed")
-	flags.BoolVar(&cfg.verbose, "verbose", false, "log every step transition to stderr")
+	flags.BoolVar(&cfg.verbose, "verbose", false,
+		"structured JSON logs on stderr instead of the progress display")
 }
 
 // envOr returns the environment value, or fallback when it is unset.

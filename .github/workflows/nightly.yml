@@ -1,0 +1,61 @@
+name: nightly
+
+# The named cells kill where somebody thought to look. This kills where nobody
+# did, at volume, and it is too slow to run on a push.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Replay a specific fuzz seed"
+        required: false
+        type: string
+      iterations:
+        description: "Kills per Postgres version"
+        required: false
+        default: "500"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: UTC
+  CGO_ENABLED: "1" # pg_query_go links the Postgres parser
+  GOTOOLCHAIN: local # never auto-upgrade the toolchain mid-run
+
+jobs:
+  fuzz:
+    name: Fuzz kill timing on Postgres ${{ matrix.postgres }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["17", "18"]
+    env:
+      MIG_PG_IMAGE: postgres:${{ matrix.postgres }}-alpine
+      MIG_FUZZ_SEED: ${{ inputs.seed }}
+      MIG_FUZZ_ITERATIONS: ${{ inputs.iterations || '500' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache-dependency-path: go.sum
+
+      - run: go mod download
+      - name: Pull the Postgres image
+        run: docker pull "$MIG_PG_IMAGE"
+
+      # A failure prints the seed that produced it. Pin that seed into a named
+      # case rather than leaving it to the next random run to find again: the
+      # matrix should grow from evidence.
+      - name: Fuzz
+        run: go test ./test/kill/ -count=1 -run TestFuzz -timeout 85m -v

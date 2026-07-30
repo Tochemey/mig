@@ -122,10 +122,12 @@ func (e *Executor) Run(ctx context.Context, p *plan.Plan) (Summary, error) {
 		return summary, err
 	}
 
+	prog := &progress{total: totalSteps(p)}
+
 	for i, migration := range p.Migrations {
 		summary.Migrations++
 
-		if err := e.runMigration(ctx, migration, built[i], &summary); err != nil {
+		if err := e.runMigration(ctx, migration, built[i], &summary, prog); err != nil {
 			summary.finish(started)
 			return summary, err
 		}
@@ -223,14 +225,31 @@ func (e *Executor) checkDrift(ctx context.Context, migration plan.Migration) err
 
 // runMigration applies every step of one migration.
 func (e *Executor) runMigration(ctx context.Context, migration plan.Migration,
-	built []step.Step, summary *Summary) error {
+	built []step.Step, summary *Summary, prog *progress) error {
 	for i, spec := range migration.Steps {
-		if err := e.runStep(ctx, migration, spec, built[i], summary); err != nil {
+		if err := e.runStep(ctx, migration, spec, built[i], summary, prog); err != nil {
 			return err
 		}
 	}
 
 	return e.setMigrationStatus(ctx, migration.ID, ledger.StatusSucceeded)
+}
+
+// progress numbers the steps of a run, across every migration in the plan, so
+// a step can be reported as the n-th of the whole rather than of its file.
+type progress struct {
+	position int
+	total    int
+}
+
+// totalSteps counts what the plan will run, for the denominator.
+func totalSteps(p *plan.Plan) int {
+	total := 0
+	for _, migration := range p.Migrations {
+		total += len(migration.Steps)
+	}
+
+	return total
 }
 
 // setMigrationStatus records a migration's outcome.

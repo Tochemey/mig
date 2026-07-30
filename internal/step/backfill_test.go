@@ -96,6 +96,14 @@ func TestBackfillResumesFromItsCursor(t *testing.T) {
 	work := newBackfill(t, step.BackfillConfig{Table: "users", Key: "id", Batch: 100})
 	env, state := newEnv(t, db)
 
+	// The resume is reported before the first batch, so a person watching the
+	// run learns where it picked up rather than wondering why it was quick.
+	var resumedFrom []step.Cursor
+
+	env.Resume = func(cursor step.Cursor) {
+		resumedFrom = append(resumedFrom, cursor)
+	}
+
 	// Half the table is already done, and recorded as such.
 	execDB(t, db, "UPDATE users SET email = legacy_email WHERE id <= 150")
 
@@ -108,6 +116,10 @@ func TestBackfillResumesFromItsCursor(t *testing.T) {
 
 	if err := work.Run(t.Context(), env); err != nil {
 		t.Fatalf("run: %v", err)
+	}
+
+	if len(resumedFrom) != 1 || resumedFrom[0].Position != 150 {
+		t.Fatalf("resume reported %v, want one report at position 150", resumedFrom)
 	}
 
 	cursor := decodeCursor(t, *state)

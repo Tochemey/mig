@@ -76,6 +76,11 @@ type run struct {
 	database string
 	dir      string
 	fixture  fixture
+
+	// proxy sits between the runner and Postgres when a test needs to take the
+	// route away rather than take the process away. Nil otherwise, in which
+	// case runners connect straight to the container.
+	proxy *harness.Proxy
 }
 
 // newRun gives the test its own database and migration directory.
@@ -108,7 +113,7 @@ func (r *run) start(point string) *harness.Process {
 	// leaves its lease behind, and the next run cannot start until it lapses.
 	args := []string{
 		"up",
-		"--dsn", shared.DSN(r.database),
+		"--dsn", r.dsn(),
 		"--dir", r.dir,
 		"--on-locked", "wait",
 		"--lease-ttl", "3s",
@@ -122,6 +127,65 @@ func (r *run) start(point string) *harness.Process {
 	r.t.Cleanup(proc.Cleanup)
 
 	return proc
+}
+
+// dsn is what a spawned runner connects to: the proxy when one is in place,
+// the container otherwise.
+func (r *run) dsn() string {
+	r.t.Helper()
+
+	if r.proxy == nil {
+		return shared.DSN(r.database)
+	}
+
+	dsn, err := r.proxy.DSN(shared.DSN(r.database))
+	if err != nil {
+		r.t.Fatalf("rewrite dsn: %v", err)
+	}
+
+	return dsn
+}
+
+// partition puts a proxy in front of the container and returns it, along with
+// the call that takes the route away.
+func (r *run) partition() (*harness.Proxy, func()) {
+	r.t.Helper()
+
+	proxy, err := harness.NewProxy(shared.Endpoint())
+	if err != nil {
+		r.t.Fatalf("start proxy: %v", err)
+	}
+
+	r.t.Cleanup(func() {
+		if err := proxy.Close(); err != nil {
+			r.t.Errorf("close proxy: %v", err)
+		}
+	})
+
+	r.proxy = proxy
+
+	return proxy, func() {
+		proxy.Cut()
+
+		// Later runs go straight to the container: the point of the cut is what
+		// the next runner finds, and it cannot find anything through a route
+		// that is gone.
+		r.proxy = nil
+	}
+}
+
+// endPartition drops the sockets the cut left hanging.
+//
+// A partitioned client that exits closes its own sockets, and the server ends
+// the backends behind them. Here the proxy holds those sockets, and it outlives
+// the runner, so the test has to drop them itself before anything can wait for
+// the backends to go.
+func (r *run) endPartition(proxy *harness.Proxy) {
+	r.t.Helper()
+
+	if err := proxy.Close(); err != nil {
+		r.t.Fatalf("close proxy: %v", err)
+	}
 }
 
 // run applies the migration and requires it to succeed.

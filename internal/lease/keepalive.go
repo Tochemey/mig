@@ -95,7 +95,12 @@ func (l *Lease) renew(ctx context.Context, cancel context.CancelCauseFunc, stop 
 		case <-ticker.C:
 		}
 
-		err := l.renewOnce(ctx)
+		// Each attempt is bounded by the interval it belongs to. A lost route
+		// answers neither way: the socket stays open, the read waits, and an
+		// unbounded attempt would sit inside this call while the lease expired
+		// underneath it. The deadline below can only be reached by an attempt
+		// that returns.
+		err := l.renewBounded(ctx, interval)
 		if err == nil {
 			l.renewedAt = time.Now()
 			continue
@@ -116,6 +121,14 @@ func (l *Lease) renew(ctx context.Context, cancel context.CancelCauseFunc, stop 
 			return
 		}
 	}
+}
+
+// renewBounded runs one renewal, giving up after limit.
+func (l *Lease) renewBounded(ctx context.Context, limit time.Duration) error {
+	attempt, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+
+	return l.renewOnce(attempt)
 }
 
 // renewOnce extends the lease by one TTL, reporting [ErrLost] when the lease
