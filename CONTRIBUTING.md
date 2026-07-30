@@ -4,6 +4,8 @@ Contributions are welcome.
 
 The project follows [Semantic Versioning](https://semver.org) and [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
 
+Before changing the executor, the lease, or a step kind, read [docs/design.md](docs/design.md): it records the decisions the code is built on, the invariants a change must preserve, and the review checklist maintainers apply.
+
 To contribute:
 
 - Fork the repository.

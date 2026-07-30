@@ -347,8 +347,8 @@ func fmtDuration(d time.Duration) string {
 	}
 }
 
-// grouped renders 4210000 as 4,210,000, which is how §16 of the design writes
-// a key, and how a person reads one.
+// grouped renders 4210000 as 4,210,000, which is how the design's success
+// transcript writes a key, and how a person reads one.
 func grouped(n int64) string {
 	digits := strconv.FormatInt(n, 10)
 

@@ -1,22 +1,20 @@
 <h1 align="center">mig</h1>
 
+<p align="center"><em>The Postgres migration tool you can kill and re-run.</em></p>
+
 <p align="center">
   <a href="https://github.com/Tochemey/mig/actions/workflows/build.yml"><img alt="build" src="https://img.shields.io/github/actions/workflow/status/Tochemey/mig/build.yml?branch=main&label=build"></a>
   <a href="https://codecov.io/gh/Tochemey/mig"><img alt="codecov" src="https://img.shields.io/codecov/c/github/Tochemey/mig/main"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/github/license/Tochemey/mig"></a>
 </p>
 
-Postgres migrations you can kill and re-run.
+Kill a migration part way through, by SIGKILL, a pod eviction or a lost node, and the fix is to run it again. Before each step, mig asks Postgres whether the work is already there instead of trusting its own record of what ran, so the next run picks up from what the database actually holds and finishes the job.
 
-Kill a migration part way through, with SIGKILL, a pod eviction or a lost node, then run it again. It converges on the same result.
-
-Before running a step, mig asks Postgres whether the work is already present. It does not rely on its own record of what ran. The catalog is the source of truth and the ledger is advisory.
-
-It is one engine in two forms: a command line tool, for running migrations as a job, and a Go library, [pkg/mig](pkg/mig), for services that embed their migrations and verify them at startup. Every command is a thin wrapper over the library, so the two cannot drift apart.
+mig is a command line tool for running migrations as a job, and a Go library, [pkg/mig](pkg/mig), for services that embed their migrations and verify them at startup. Both are one engine: every command is a thin wrapper over the library, so the two cannot drift apart.
 
 ## Contents
 
-- [Why](#why)
+- [Premise](#premise)
 - [Install](#install)
 - [Quick start](#quick-start)
 - [How it recovers](#how-it-recovers)
@@ -32,16 +30,24 @@ It is one engine in two forms: a command line tool, for running migrations as a 
 - [Adopting an existing history](#adopting-an-existing-history)
   - [From goose](#from-goose)
   - [From golang-migrate](#from-golang-migrate)
-- [Limitations](#limitations)
 - [Contributing](#contributing)
 
-## Why
+## Premise
 
-Most migration tools record what they did in a table of their own. That record can disagree with the database, and when it does the tool has no way to tell which of the two is correct.
+Most migration tools treat their own version table as the source of truth: the table says version 7, so apply version 8. That works exactly as long as DDL is transactional, because the version write can ride in the same commit as the DDL it describes.
 
-`CREATE INDEX CONCURRENTLY` shows the problem. If the build is interrupted, Postgres leaves the index in place with `indisvalid = false` and will not resume it. A tool that trusts its own record either finds no entry and reruns the statement, which fails on the duplicate name, or finds a success entry and skips it, leaving an index the planner never uses.
+Postgres has statements that refuse to run inside a transaction: `CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `ALTER TYPE ... ADD VALUE`, and any backfill too large for one commit. For those, the work and the record of it are two separate commits, and a crash between them leaves the record lying. Most tools respond by marking the database dirty and halting, which is an honest admission that they no longer know what state the database is in.
 
-Reading the catalog answers this without ambiguity: the index exists, it is not valid, so drop it and rebuild. mig makes that check before every step, from whatever state the database is in.
+`CREATE INDEX CONCURRENTLY` shows how that plays out. Interrupt the build and Postgres leaves the index in place with `indisvalid = false`, and will not resume it. A tool that trusts its own record either finds no entry and reruns the statement, which fails on the duplicate name, or finds a success entry and skips the step, shipping an index the planner never uses.
+
+**`mig` inverts this. The catalog is the truth; the ledger is a hint.**
+
+- The **catalog** is Postgres's own account of what exists: `pg_class`, `pg_index`, `pg_attribute` and the rest of the system tables. An index or a column is real exactly when the catalog says it is.
+- The **ledger** is mig's bookkeeping: a schema named `mig`, created on the first run, holding what the catalog cannot know: each step's attempts, prior errors, a backfill's cursor, and the lease. It records what mig did, which is not the same as what is true.
+
+Before a step runs, mig asks the catalog what the actual state is and acts on the answer. The invalid index above is found, dropped and rebuilt, whatever state the database starts in, and the ledger is never permitted to authorize that decision. One invariant governs the whole design:
+
+> Every step must converge to `succeeded` from an arbitrary, unknown starting state, using only the catalog and its own checkpoint.
 
 ## Install
 
@@ -114,14 +120,7 @@ Run it again, or kill the first run part way through and then run it again. Eith
 
 ## How it recovers
 
-Two words carry the design, and this README uses them throughout:
-
-- The **catalog** is Postgres's own account of what exists: `pg_class`, `pg_index`, `pg_attribute` and the rest of the system tables. An index or a column is real exactly when the catalog says it is.
-- The **ledger** is mig's own bookkeeping: a schema named `mig`, created on the first run, holding each step's attempts, status and checkpoint, plus the lease. It records what mig did, which is not the same as what is true.
-
-When the two disagree, the catalog wins. The ledger advises: it says where to look and what may need repair, and only one narrow case trusts it outright.
-
-This is what that looks like. Kill a run during a concurrent index build, then run it again:
+Kill a run during a concurrent index build, then run it again:
 
 ```
   [1/2] index_legacy_email
@@ -376,11 +375,6 @@ adopted 1 migration(s) from golang-migrate
 ```
 
 Here version 2 was being applied when the run died. The next `mig up` checks what actually landed and applies only what is missing, with nobody clearing anything by hand.
-
-## Limitations
-
-- **Down migrations are not run.** A rollback cannot reverse a destructive change, and running one against a schema that a failed `up` left half applied is guesswork. Re-running a converging `up` is the recovery path. A CI check that applies up, down and up again against a throwaway database and compares schema fingerprints is planned instead.
-- **Transaction poolers are refused.** Session state on a pooled handle is meaningless and every step needs a pinned connection. mig detects PgBouncer in transaction mode and stops, instead of working around it and failing later in a way that is hard to diagnose.
 
 ## Contributing
 
