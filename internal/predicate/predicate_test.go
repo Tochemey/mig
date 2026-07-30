@@ -27,6 +27,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/tochemey/mig/internal/parse"
@@ -129,8 +130,10 @@ CREATE INDEX CONCURRENTLY idx_users_legacy_email ON users (legacy_email);
 // predicate. Guessing one would be worse than admitting there is none.
 func TestInferDeclinesWhatItCannotCheck(t *testing.T) {
 	cases := map[string]string{
-		"alter type": "ALTER TYPE mood ADD VALUE 'ok'",
-		"update":     "UPDATE users SET name = 'x'",
+		"update":          "UPDATE users SET name = 'x'",
+		"set default":     "ALTER TABLE users ALTER COLUMN name SET DEFAULT 'x'",
+		"unnamed check":   "ALTER TABLE users ADD CHECK (name <> '')",
+		"several actions": "ALTER TABLE users ADD COLUMN a text, ADD COLUMN b text",
 		// One unclassified statement makes the whole step uninferable.
 		"mixed": "CREATE INDEX CONCURRENTLY idx ON users (name); VACUUM users;",
 	}
@@ -160,7 +163,7 @@ func TestSQLPredicate(t *testing.T) {
 
 	check := predicate.SQL(
 		"SELECT EXISTS (SELECT 1 FROM information_schema.columns " +
-			"WHERE table_name = 'users' AND column_name = 'email')")
+			"WHERE table_name = 'users' AND column_name = 'email')").Satisfied
 
 	if satisfied(t, check, db) {
 		t.Fatal("satisfied before the column existed")
@@ -178,7 +181,9 @@ func TestSQLPredicate(t *testing.T) {
 func TestSQLPredicateReportsFailure(t *testing.T) {
 	db := newDatabase(t)
 
-	if _, err := predicate.SQL("SELECT nonsense FROM nowhere")(t.Context(), db); err == nil {
+	broken := predicate.SQL("SELECT nonsense FROM nowhere")
+
+	if _, err := broken.Satisfied(t.Context(), db); err == nil {
 		t.Fatal("a broken predicate reported a result")
 	}
 }
@@ -206,6 +211,15 @@ func TestPredicateReportsQueryFailure(t *testing.T) {
 
 // infer builds the predicate for a step's SQL, requiring one to exist.
 func infer(t *testing.T, sql string) step.Predicate {
+	t.Helper()
+
+	check := inferCheck(t, sql)
+
+	return check.Satisfied
+}
+
+// inferCheck builds the whole check, predicate and description together.
+func inferCheck(t *testing.T, sql string) *predicate.Check {
 	t.Helper()
 
 	statements, err := parse.Parse(sql)
@@ -252,7 +266,9 @@ func newDatabase(t *testing.T) *sql.DB {
 	}
 
 	t.Cleanup(func() {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Errorf("close pool: %v", err)
+		}
 
 		if err := shared.DropDatabase(context.Background(), name); err != nil {
 			t.Errorf("drop clone %q: %v", name, err)
@@ -268,5 +284,157 @@ func exec(t *testing.T, db *sql.DB, stmt string) {
 
 	if _, err := db.ExecContext(t.Context(), stmt); err != nil {
 		t.Fatalf("exec %q: %v", stmt, err)
+	}
+}
+
+// TestInferCoversTheWholeTable walks every statement the design says carries a
+// predicate, against a real database, through the three states each passes
+// through: before the work, after it, and — where the two differ — part-way.
+func TestInferCoversTheWholeTable(t *testing.T) {
+	cases := []struct {
+		name    string
+		sql     string
+		prepare []string
+		satisfy []string
+	}{
+		{
+			name:    "add column",
+			sql:     "ALTER TABLE users ADD COLUMN email text",
+			satisfy: []string{"ALTER TABLE users ADD COLUMN email text"},
+		},
+		{
+			name:    "drop column",
+			sql:     "ALTER TABLE users DROP COLUMN legacy_email",
+			satisfy: []string{"ALTER TABLE users DROP COLUMN legacy_email"},
+		},
+		{
+			name: "add constraint",
+			sql:  "ALTER TABLE users ADD CONSTRAINT users_name_len CHECK (length(name) > 0) NOT VALID",
+			satisfy: []string{
+				"ALTER TABLE users ADD CONSTRAINT users_name_len CHECK (length(name) > 0) NOT VALID",
+			},
+		},
+		{
+			name: "validate constraint",
+			sql:  "ALTER TABLE users VALIDATE CONSTRAINT users_name_len",
+			// Adding it is not enough: a constraint added NOT VALID exists and
+			// is not validated, which is exactly the distinction this predicate
+			// has to make.
+			prepare: []string{
+				"ALTER TABLE users ADD CONSTRAINT users_name_len CHECK (length(name) > 0) NOT VALID",
+			},
+			satisfy: []string{"ALTER TABLE users VALIDATE CONSTRAINT users_name_len"},
+		},
+		{
+			name:    "create table",
+			sql:     "CREATE TABLE audit (id bigint PRIMARY KEY)",
+			satisfy: []string{"CREATE TABLE audit (id bigint PRIMARY KEY)"},
+		},
+		{
+			name:    "add enum value",
+			sql:     "ALTER TYPE mood ADD VALUE 'ok'",
+			prepare: []string{"CREATE TYPE mood AS ENUM ('bad')"},
+			satisfy: []string{"ALTER TYPE mood ADD VALUE 'ok'"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newDatabase(t)
+			check := infer(t, tc.sql)
+
+			for _, stmt := range tc.prepare {
+				exec(t, db, stmt)
+			}
+
+			if satisfied(t, check, db) {
+				t.Fatal("satisfied before the work was done")
+			}
+
+			for _, stmt := range tc.satisfy {
+				exec(t, db, stmt)
+			}
+
+			if !satisfied(t, check, db) {
+				t.Fatal("not satisfied once the work was done")
+			}
+		})
+	}
+}
+
+// TestDropColumnNeedsItsTable covers a predicate that would otherwise be
+// satisfied for the wrong reason.
+//
+// A column of a table that does not exist is absent, so a bare absence check
+// would report the drop as done and hide a migration series in which the table
+// was never created.
+func TestDropColumnNeedsItsTable(t *testing.T) {
+	db := newDatabase(t)
+
+	missing := infer(t, "ALTER TABLE no_such_table DROP COLUMN legacy_email")
+
+	if satisfied(t, missing, db) {
+		t.Fatal("a drop against a table that does not exist was reported as done")
+	}
+
+	present := infer(t, "ALTER TABLE users DROP COLUMN legacy_email")
+
+	if satisfied(t, present, db) {
+		t.Fatal("satisfied while the column was still there")
+	}
+
+	exec(t, db, "ALTER TABLE users DROP COLUMN legacy_email")
+
+	if !satisfied(t, present, db) {
+		t.Fatal("not satisfied once the column was dropped")
+	}
+}
+
+// TestInferDescribesWhatItChecks covers the words `mig plan` prints. They come
+// from the same switch as the predicate, so a description that drifts from what
+// is evaluated is a description that cannot be trusted.
+func TestInferDescribesWhatItChecks(t *testing.T) {
+	cases := map[string]string{
+		"CREATE INDEX CONCURRENTLY idx ON users (email)": "index idx exists and is valid and ready",
+		"DROP INDEX idx": "index idx is absent",
+		"ALTER TABLE users ADD COLUMN email text":                   "column users.email exists",
+		"ALTER TABLE users DROP COLUMN email":                       "table users exists and column users.email does not",
+		"ALTER TABLE users ADD CONSTRAINT k CHECK (true) NOT VALID": "constraint users.k exists",
+		"ALTER TABLE users VALIDATE CONSTRAINT k":                   "constraint users.k exists and is validated",
+		"CREATE TABLE audit (id bigint)":                            "relation audit exists",
+		"ALTER TYPE mood ADD VALUE 'ok'":                            `enum mood has label "ok"`,
+	}
+
+	for sql, want := range cases {
+		t.Run(want, func(t *testing.T) {
+			if got := inferCheck(t, sql).Describe; got != want {
+				t.Fatalf("described as %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestInferJoinsDescriptions covers a step holding several statements, which is
+// satisfied only when all of them are.
+func TestInferJoinsDescriptions(t *testing.T) {
+	const sql = `
+ALTER TABLE users ADD COLUMN email text;
+CREATE INDEX idx_users_email ON users (email);
+`
+
+	const want = "column users.email exists, and index idx_users_email exists and is valid and ready"
+
+	if got := inferCheck(t, sql).Describe; got != want {
+		t.Fatalf("described as %q, want %q", got, want)
+	}
+}
+
+// TestSQLPredicateDescribesItself covers the escape hatch showing what it will
+// run, since nothing else can say what it means.
+func TestSQLPredicateDescribesItself(t *testing.T) {
+	check := predicate.SQL("SELECT true")
+
+	if !strings.Contains(check.Describe, "SELECT true") {
+		t.Fatalf("described as %q", check.Describe)
 	}
 }

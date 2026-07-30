@@ -314,8 +314,12 @@ func newFilledTable(t *testing.T, rows int) (*sql.DB, *sql.Conn) {
 	}
 
 	t.Cleanup(func() {
-		_ = conn.Close()
-		_ = db.Close()
+		if err := conn.Close(); err != nil {
+			t.Errorf("close connection: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Errorf("close pool: %v", err)
+		}
 
 		if err := shared.DropDatabase(context.Background(), name); err != nil {
 			t.Errorf("drop clone %q: %v", name, err)

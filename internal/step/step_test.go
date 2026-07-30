@@ -278,7 +278,7 @@ func noTxStep(t *testing.T, sql string) *step.DDLNoTx {
 		t.Fatalf("parse %q: %v", sql, err)
 	}
 
-	target := statements[0].Index
+	target := statements[0].Target
 
 	check := func(ctx context.Context, q catalog.Querier) (bool, error) {
 		index, err := catalog.LookupIndex(ctx, q, target.Schema, target.Name)
@@ -333,8 +333,12 @@ func newConn(t *testing.T) *sql.Conn {
 	}
 
 	t.Cleanup(func() {
-		_ = conn.Close()
-		_ = db.Close()
+		if err := conn.Close(); err != nil {
+			t.Errorf("close connection: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Errorf("close pool: %v", err)
+		}
 
 		if err := shared.DropDatabase(context.Background(), name); err != nil {
 			t.Errorf("drop clone %q: %v", name, err)

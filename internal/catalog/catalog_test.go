@@ -187,7 +187,9 @@ func newDatabase(t *testing.T) *sql.DB {
 	}
 
 	t.Cleanup(func() {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Errorf("close pool: %v", err)
+		}
 
 		if err := shared.DropDatabase(context.Background(), name); err != nil {
 			t.Errorf("drop clone %q: %v", name, err)
@@ -216,4 +218,182 @@ func fingerprint(t *testing.T, db *sql.DB) string {
 	}
 
 	return sum
+}
+
+// TestLookupColumn covers the presence check a column step is judged by,
+// including a dropped column: Postgres keeps the row and marks it, so a plain
+// name match would report one that is gone as still there.
+func TestLookupColumn(t *testing.T) {
+	db := newDatabase(t)
+	ctx := t.Context()
+
+	if exists := column(t, db, "users", "email"); exists {
+		t.Fatal("a column that was never added was reported present")
+	}
+
+	exec(t, db, "ALTER TABLE users ADD COLUMN email text")
+
+	if !column(t, db, "users", "email") {
+		t.Fatal("an added column was reported absent")
+	}
+
+	exec(t, db, "ALTER TABLE users DROP COLUMN email")
+
+	if column(t, db, "users", "email") {
+		t.Fatal("a dropped column was reported present")
+	}
+
+	// A relation that is not there has no columns rather than being an error.
+	if _, err := catalog.LookupColumn(ctx, db, "", "no_such_table", "id"); err != nil {
+		t.Fatalf("look up on a missing relation: %v", err)
+	}
+
+	// A system column is not one a migration can add or drop.
+	if column(t, db, "users", "ctid") {
+		t.Fatal("a system column was reported as one of the table's own")
+	}
+}
+
+// TestLookupConstraint covers the distinction two separate steps depend on: a
+// constraint added NOT VALID exists and is not validated, and validating it is
+// the second step's whole job.
+func TestLookupConstraint(t *testing.T) {
+	db := newDatabase(t)
+	ctx := t.Context()
+
+	before, err := catalog.LookupConstraint(ctx, db, "", "users", "users_name_len")
+	if err != nil {
+		t.Fatalf("look up: %v", err)
+	}
+
+	if before.Exists {
+		t.Fatalf("a constraint that was never added is reported as %+v", before)
+	}
+
+	exec(t, db, "ALTER TABLE users ADD CONSTRAINT users_name_len CHECK (length(name) > 0) NOT VALID")
+
+	added, err := catalog.LookupConstraint(ctx, db, "", "users", "users_name_len")
+	if err != nil {
+		t.Fatalf("look up: %v", err)
+	}
+
+	if !added.Exists || added.Validated {
+		t.Fatalf("a NOT VALID constraint is reported as %+v", added)
+	}
+
+	exec(t, db, "ALTER TABLE users VALIDATE CONSTRAINT users_name_len")
+
+	validated, err := catalog.LookupConstraint(ctx, db, "", "users", "users_name_len")
+	if err != nil {
+		t.Fatalf("look up: %v", err)
+	}
+
+	if !validated.Exists || !validated.Validated {
+		t.Fatalf("a validated constraint is reported as %+v", validated)
+	}
+}
+
+// TestLookupRelation covers the check a CREATE TABLE step is judged by.
+func TestLookupRelation(t *testing.T) {
+	db := newDatabase(t)
+	ctx := t.Context()
+
+	exists, err := catalog.LookupRelation(ctx, db, "", "audit")
+	if err != nil {
+		t.Fatalf("look up: %v", err)
+	}
+
+	if exists {
+		t.Fatal("a table that was never created was reported present")
+	}
+
+	exec(t, db, "CREATE TABLE audit (id bigint PRIMARY KEY)")
+
+	if exists, err = catalog.LookupRelation(ctx, db, "", "audit"); err != nil || !exists {
+		t.Fatalf("a created table is reported as %v (%v)", exists, err)
+	}
+}
+
+// TestLookupEnumLabel covers the check an ALTER TYPE step is judged by. A type
+// that is not there carries no labels rather than being an error, since the
+// step that creates it may not have run.
+func TestLookupEnumLabel(t *testing.T) {
+	db := newDatabase(t)
+	ctx := t.Context()
+
+	missing, err := catalog.LookupEnumLabel(ctx, db, "", "mood", "ok")
+	if err != nil {
+		t.Fatalf("look up on a missing type: %v", err)
+	}
+
+	if missing {
+		t.Fatal("a label on a type that does not exist was reported present")
+	}
+
+	exec(t, db, "CREATE TYPE mood AS ENUM ('bad')")
+
+	if has := label(t, db, "mood", "ok"); has {
+		t.Fatal("a label that was never added was reported present")
+	}
+
+	if !label(t, db, "mood", "bad") {
+		t.Fatal("a label the type was created with was reported absent")
+	}
+
+	exec(t, db, "ALTER TYPE mood ADD VALUE 'ok'")
+
+	if !label(t, db, "mood", "ok") {
+		t.Fatal("an added label was reported absent")
+	}
+}
+
+// TestLookupsReportQueryFailure covers a broken connection, which must not be
+// reported as an absent object and so as work still to do.
+func TestLookupsReportQueryFailure(t *testing.T) {
+	db := newDatabase(t)
+	ctx := t.Context()
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if _, err := catalog.LookupColumn(ctx, db, "", "users", "email"); err == nil {
+		t.Fatal("column lookup on a closed database returned no error")
+	}
+
+	if _, err := catalog.LookupConstraint(ctx, db, "", "users", "k"); err == nil {
+		t.Fatal("constraint lookup on a closed database returned no error")
+	}
+
+	if _, err := catalog.LookupRelation(ctx, db, "", "users"); err == nil {
+		t.Fatal("relation lookup on a closed database returned no error")
+	}
+
+	if _, err := catalog.LookupEnumLabel(ctx, db, "", "mood", "ok"); err == nil {
+		t.Fatal("enum lookup on a closed database returned no error")
+	}
+}
+
+// column reports whether a column is present, or fails the test.
+func column(t *testing.T, db *sql.DB, table, name string) bool {
+	t.Helper()
+
+	exists, err := catalog.LookupColumn(t.Context(), db, "", table, name)
+	if err != nil {
+		t.Fatalf("look up column %s.%s: %v", table, name, err)
+	}
+
+	return exists
+}
+
+// label reports whether an enum carries a label, or fails the test.
+func label(t *testing.T, db *sql.DB, name, value string) bool {
+	t.Helper()
+
+	has, err := catalog.LookupEnumLabel(t.Context(), db, "", name, value)
+	if err != nil {
+		t.Fatalf("look up label %q of %s: %v", value, name, err)
+	}
+
+	return has
 }

@@ -43,64 +43,64 @@ func TestParseClassifiesIndexStatements(t *testing.T) {
 			name: "create index",
 			sql:  "CREATE INDEX idx_users_email ON users (email)",
 			want: parse.Statement{
-				Kind:  parse.KindCreateIndex,
-				Index: parse.Index{Name: "idx_users_email", Table: "users"},
+				Kind:   parse.KindCreateIndex,
+				Target: parse.Target{Name: "idx_users_email", On: "users"},
 			},
 		},
 		{
 			name: "create index concurrently",
 			sql:  "CREATE INDEX CONCURRENTLY idx_users_email ON users (email)",
 			want: parse.Statement{
-				Kind:  parse.KindCreateIndex,
-				Index: parse.Index{Name: "idx_users_email", Table: "users", Concurrent: true},
+				Kind:   parse.KindCreateIndex,
+				Target: parse.Target{Name: "idx_users_email", On: "users", Concurrent: true},
 			},
 		},
 		{
 			name: "schema qualified table",
 			sql:  "CREATE INDEX CONCURRENTLY idx ON app.users (email)",
 			want: parse.Statement{
-				Kind:  parse.KindCreateIndex,
-				Index: parse.Index{Schema: "app", Name: "idx", Table: "users", Concurrent: true},
+				Kind:   parse.KindCreateIndex,
+				Target: parse.Target{Schema: "app", Name: "idx", On: "users", Concurrent: true},
 			},
 		},
 		{
 			name: "quoted identifiers",
 			sql:  `CREATE INDEX "Mixed Case" ON "Users" ("Email")`,
 			want: parse.Statement{
-				Kind:  parse.KindCreateIndex,
-				Index: parse.Index{Name: "Mixed Case", Table: "Users"},
+				Kind:   parse.KindCreateIndex,
+				Target: parse.Target{Name: "Mixed Case", On: "Users"},
 			},
 		},
 		{
 			name: "partial index with a where clause",
 			sql:  "CREATE INDEX CONCURRENTLY idx ON users (email) WHERE email IS NOT NULL",
 			want: parse.Statement{
-				Kind:  parse.KindCreateIndex,
-				Index: parse.Index{Name: "idx", Table: "users", Concurrent: true},
+				Kind:   parse.KindCreateIndex,
+				Target: parse.Target{Name: "idx", On: "users", Concurrent: true},
 			},
 		},
 		{
 			name: "multi-line with a trailing comment",
 			sql:  "CREATE INDEX CONCURRENTLY idx\n  ON users (email) -- the point of the migration",
 			want: parse.Statement{
-				Kind:  parse.KindCreateIndex,
-				Index: parse.Index{Name: "idx", Table: "users", Concurrent: true},
+				Kind:   parse.KindCreateIndex,
+				Target: parse.Target{Name: "idx", On: "users", Concurrent: true},
 			},
 		},
 		{
 			name: "drop index",
 			sql:  "DROP INDEX idx_users_email",
 			want: parse.Statement{
-				Kind:  parse.KindDropIndex,
-				Index: parse.Index{Name: "idx_users_email"},
+				Kind:   parse.KindDropIndex,
+				Target: parse.Target{Name: "idx_users_email"},
 			},
 		},
 		{
 			name: "drop index concurrently if exists",
 			sql:  "DROP INDEX CONCURRENTLY IF EXISTS app.idx_users_email",
 			want: parse.Statement{
-				Kind:  parse.KindDropIndex,
-				Index: parse.Index{Schema: "app", Name: "idx_users_email", Concurrent: true},
+				Kind:   parse.KindDropIndex,
+				Target: parse.Target{Schema: "app", Name: "idx_users_email", Concurrent: true},
 			},
 		},
 	}
@@ -122,8 +122,110 @@ func TestParseClassifiesIndexStatements(t *testing.T) {
 				t.Fatalf("kind is %q, want %q", got.Kind, tc.want.Kind)
 			}
 
-			if got.Index != tc.want.Index {
-				t.Fatalf("index is %+v, want %+v", got.Index, tc.want.Index)
+			if got.Target != tc.want.Target {
+				t.Fatalf("target is %+v, want %+v", got.Target, tc.want.Target)
+			}
+		})
+	}
+}
+
+// TestParseClassifiesTheRestOfTheTable covers every remaining statement the
+// executor can reconcile from the catalog.
+func TestParseClassifiesTheRestOfTheTable(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		want parse.Statement
+	}{
+		{
+			name: "add column",
+			sql:  "ALTER TABLE users ADD COLUMN email text",
+			want: parse.Statement{
+				Kind:   parse.KindAddColumn,
+				Target: parse.Target{Name: "users", Member: "email"},
+			},
+		},
+		{
+			name: "add column if not exists, schema qualified",
+			sql:  "ALTER TABLE app.users ADD COLUMN IF NOT EXISTS email text",
+			want: parse.Statement{
+				Kind:   parse.KindAddColumn,
+				Target: parse.Target{Schema: "app", Name: "users", Member: "email"},
+			},
+		},
+		{
+			name: "drop column",
+			sql:  "ALTER TABLE users DROP COLUMN legacy_email",
+			want: parse.Statement{
+				Kind:   parse.KindDropColumn,
+				Target: parse.Target{Name: "users", Member: "legacy_email"},
+			},
+		},
+		{
+			name: "add constraint not valid",
+			sql:  "ALTER TABLE users ADD CONSTRAINT users_email_nn CHECK (email IS NOT NULL) NOT VALID",
+			want: parse.Statement{
+				Kind:   parse.KindAddConstraint,
+				Target: parse.Target{Name: "users", Member: "users_email_nn"},
+			},
+		},
+		{
+			name: "validate constraint",
+			sql:  "ALTER TABLE users VALIDATE CONSTRAINT users_email_nn",
+			want: parse.Statement{
+				Kind:   parse.KindValidateConstraint,
+				Target: parse.Target{Name: "users", Member: "users_email_nn"},
+			},
+		},
+		{
+			name: "create table",
+			sql:  "CREATE TABLE audit (id bigint PRIMARY KEY)",
+			want: parse.Statement{
+				Kind:   parse.KindCreateTable,
+				Target: parse.Target{Name: "audit"},
+			},
+		},
+		{
+			name: "create table if not exists, schema qualified",
+			sql:  "CREATE TABLE IF NOT EXISTS app.audit (id bigint)",
+			want: parse.Statement{
+				Kind:   parse.KindCreateTable,
+				Target: parse.Target{Schema: "app", Name: "audit"},
+			},
+		},
+		{
+			name: "add enum value",
+			sql:  "ALTER TYPE mood ADD VALUE 'ok'",
+			want: parse.Statement{
+				Kind:   parse.KindAddEnumValue,
+				Target: parse.Target{Name: "mood", Member: "ok"},
+			},
+		},
+		{
+			name: "add enum value if not exists, schema qualified",
+			sql:  "ALTER TYPE app.mood ADD VALUE IF NOT EXISTS 'great' BEFORE 'ok'",
+			want: parse.Statement{
+				Kind:   parse.KindAddEnumValue,
+				Target: parse.Target{Schema: "app", Name: "mood", Member: "great"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			statements, err := parse.Parse(tc.sql)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+
+			got := statements[0]
+
+			if got.Kind != tc.want.Kind {
+				t.Fatalf("kind is %q, want %q", got.Kind, tc.want.Kind)
+			}
+
+			if got.Target != tc.want.Target {
+				t.Fatalf("target is %+v, want %+v", got.Target, tc.want.Target)
 			}
 		})
 	}
@@ -134,14 +236,20 @@ func TestParseClassifiesIndexStatements(t *testing.T) {
 // the plan refuses it rather than guessing.
 func TestParseLeavesOtherStatementsUnclassified(t *testing.T) {
 	cases := []string{
-		"ALTER TABLE users ADD COLUMN email text",
 		"UPDATE users SET email = legacy_email WHERE id > 0",
-		"ALTER TYPE mood ADD VALUE 'ok'",
 		"VACUUM ANALYZE users",
 		// Several indexes at once: the caller needs one to reason about.
 		"DROP INDEX idx_a, idx_b",
 		// A DROP that is not a drop of an index.
 		"DROP TABLE users",
+		// Several actions at once: they have no single predicate between them.
+		"ALTER TABLE users ADD COLUMN a text, ADD COLUMN b text",
+		// An action outside the table: nothing to look for afterwards.
+		"ALTER TABLE users ALTER COLUMN name SET DEFAULT 'x'",
+		// A constraint the server will name, so there is no name to check.
+		"ALTER TABLE users ADD CHECK (name <> '')",
+		// Renaming a label rather than adding one.
+		"ALTER TYPE mood RENAME VALUE 'ok' TO 'fine'",
 	}
 
 	for _, sql := range cases {
@@ -243,14 +351,14 @@ func TestChecksumRejectsInvalidSQL(t *testing.T) {
 	}
 }
 
-// TestIndexQualified covers the name used in reconciliation errors.
-func TestIndexQualified(t *testing.T) {
-	bare := parse.Index{Name: "idx"}
+// TestTargetQualified covers the name used in reconciliation errors.
+func TestTargetQualified(t *testing.T) {
+	bare := parse.Target{Name: "idx"}
 	if got := bare.Qualified(); got != "idx" {
 		t.Fatalf("bare index renders as %q", got)
 	}
 
-	qualified := parse.Index{Schema: "app", Name: "idx"}
+	qualified := parse.Target{Schema: "app", Name: "idx"}
 	if got := qualified.Qualified(); got != "app.idx" {
 		t.Fatalf("qualified index renders as %q", got)
 	}

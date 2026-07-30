@@ -105,3 +105,105 @@ func QualifiedIdent(schema, name string) string {
 func quoteIdent(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
+
+// columnQuery reports whether a column is present on a relation.
+//
+// attisdropped covers a column that was dropped: Postgres keeps the row and
+// marks it, so a plain name match would report a dropped column as present.
+// The attnum bound excludes the system columns every relation has.
+const columnQuery = `
+SELECT EXISTS (
+  SELECT 1
+    FROM pg_attribute
+   WHERE attrelid = to_regclass($1)
+     AND attname = $2
+     AND attnum > 0
+     AND NOT attisdropped)`
+
+// LookupColumn reports whether a column exists on a relation. A relation that
+// is not there has no columns rather than being an error.
+func LookupColumn(ctx context.Context, q Querier, schema, table, column string) (bool, error) {
+	ident := QualifiedIdent(schema, table)
+
+	var exists bool
+
+	if err := q.QueryRowContext(ctx, columnQuery, ident, column).Scan(&exists); err != nil {
+		return false, fmt.Errorf("look up column %s.%s: %w", ident, column, err)
+	}
+
+	return exists, nil
+}
+
+// Constraint is a constraint's state.
+//
+// Existence and validation are separate because they are reached separately: a
+// constraint added NOT VALID exists and is not validated, and validating it is
+// a second step that runs without holding the table against writers.
+type Constraint struct {
+	Exists    bool
+	Validated bool
+}
+
+const constraintQuery = `
+SELECT convalidated
+  FROM pg_constraint
+ WHERE conrelid = to_regclass($1) AND conname = $2`
+
+// LookupConstraint reads the state of a constraint on a relation.
+func LookupConstraint(ctx context.Context, q Querier, schema, table, name string) (Constraint, error) {
+	ident := QualifiedIdent(schema, table)
+
+	var constraint Constraint
+
+	err := q.QueryRowContext(ctx, constraintQuery, ident, name).Scan(&constraint.Validated)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return Constraint{}, nil
+	}
+
+	if err != nil {
+		return Constraint{}, fmt.Errorf("look up constraint %s on %s: %w", name, ident, err)
+	}
+
+	constraint.Exists = true
+
+	return constraint, nil
+}
+
+const relationQuery = `SELECT to_regclass($1) IS NOT NULL`
+
+// LookupRelation reports whether a relation exists.
+func LookupRelation(ctx context.Context, q Querier, schema, name string) (bool, error) {
+	ident := QualifiedIdent(schema, name)
+
+	var exists bool
+
+	if err := q.QueryRowContext(ctx, relationQuery, ident).Scan(&exists); err != nil {
+		return false, fmt.Errorf("look up relation %s: %w", ident, err)
+	}
+
+	return exists, nil
+}
+
+// enumLabelQuery reports whether an enum carries a label. to_regtype resolves
+// the type through the search path, and yields nothing for a type that is not
+// there, which is an absent label rather than an error.
+const enumLabelQuery = `
+SELECT EXISTS (
+  SELECT 1
+    FROM pg_enum
+   WHERE enumtypid = to_regtype($1)
+     AND enumlabel = $2)`
+
+// LookupEnumLabel reports whether an enum type carries a label.
+func LookupEnumLabel(ctx context.Context, q Querier, schema, name, label string) (bool, error) {
+	ident := QualifiedIdent(schema, name)
+
+	var exists bool
+
+	if err := q.QueryRowContext(ctx, enumLabelQuery, ident, label).Scan(&exists); err != nil {
+		return false, fmt.Errorf("look up label %q of enum %s: %w", label, ident, err)
+	}
+
+	return exists, nil
+}

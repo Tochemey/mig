@@ -272,7 +272,9 @@ func newDatabase(t *testing.T) *sql.DB {
 	}
 
 	t.Cleanup(func() {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Errorf("close pool: %v", err)
+		}
 
 		if err := shared.DropDatabase(context.Background(), name); err != nil {
 			t.Errorf("drop clone %q: %v", name, err)

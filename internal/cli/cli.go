@@ -34,7 +34,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/tochemey/mig/internal/lease"
+	"github.com/tochemey/mig/pkg/mig"
 )
 
 // Version identifies this build in application_name and in logs.
@@ -49,8 +49,9 @@ const (
 	// ExitError means the run failed.
 	ExitError = 1
 
-	// ExitPending is reserved for verify against a database with work
-	// outstanding.
+	// ExitPending means verify found work outstanding. It is distinct from
+	// ExitError because a scheduler treats "not migrated yet" and "the check
+	// itself failed" differently.
 	ExitPending = 3
 
 	// ExitLocked means another runner holds the lease.
@@ -79,6 +80,11 @@ func New() *cobra.Command {
 	}
 
 	root.AddCommand(newUpCommand())
+	root.AddCommand(newPlanCommand())
+	root.AddCommand(newVerifyCommand())
+	root.AddCommand(newStatusCommand())
+	root.AddCommand(newImportCommand())
+	root.AddCommand(newFingerprintCommand())
 
 	return root
 }
@@ -124,14 +130,27 @@ type config struct {
 	verbose  bool
 }
 
-// bind registers the common flags, defaulting from the environment.
-func bind(cmd *cobra.Command, cfg *config) {
+// bindDSN registers the flag every command that connects needs.
+func bindDSN(cmd *cobra.Command, cfg *config) {
+	cmd.Flags().StringVar(&cfg.dsn, "dsn", os.Getenv(EnvDSN), "postgres connection string")
+}
+
+// bindDatabase adds the migration directory, for a command that reads it.
+func bindDatabase(cmd *cobra.Command, cfg *config) {
+	bindDSN(cmd, cfg)
+
+	cmd.Flags().StringVar(&cfg.dir, "dir", envOr(EnvDir, "migrations"),
+		"directory holding migration files")
+}
+
+// bindApply adds the flags only a run that writes needs.
+func bindApply(cmd *cobra.Command, cfg *config) {
+	bindDatabase(cmd, cfg)
+
 	flags := cmd.Flags()
 
-	flags.StringVar(&cfg.dsn, "dsn", os.Getenv(EnvDSN), "postgres connection string")
-	flags.StringVar(&cfg.dir, "dir", envOr(EnvDir, "migrations"), "directory holding migration files")
-	flags.DurationVar(&cfg.ttl, "lease-ttl", envDuration(EnvLeaseTTL, lease.DefaultTTL), "lease validity window")
-	flags.StringVar(&cfg.onLocked, "on-locked", string(lease.Wait), "wait or fail when another runner holds the lease")
+	flags.DurationVar(&cfg.ttl, "lease-ttl", envDuration(EnvLeaseTTL, mig.DefaultTTL), "lease validity window")
+	flags.StringVar(&cfg.onLocked, "on-locked", string(mig.Wait), "wait or fail when another runner holds the lease")
 	flags.BoolVar(&cfg.drift, "allow-drift", false, "continue when an applied step's checksum has changed")
 	flags.BoolVar(&cfg.verbose, "verbose", false, "log every step transition to stderr")
 }

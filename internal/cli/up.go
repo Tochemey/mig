@@ -31,16 +31,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver
 	"github.com/spf13/cobra"
 
-	"github.com/tochemey/mig/internal/crash"
-	"github.com/tochemey/mig/internal/exec"
-	"github.com/tochemey/mig/internal/lease"
-	"github.com/tochemey/mig/internal/ledger"
-	"github.com/tochemey/mig/internal/plan"
 	"github.com/tochemey/mig/internal/session"
+	"github.com/tochemey/mig/pkg/mig"
 )
 
 const (
@@ -69,7 +66,7 @@ func newUpCommand() *cobra.Command {
 		},
 	}
 
-	bind(cmd, &cfg)
+	bindApply(cmd, &cfg)
 
 	return cmd
 }
@@ -81,11 +78,6 @@ func runUp(ctx context.Context, cfg config, stdout, stderr io.Writer) (err error
 	}
 
 	log := logger(stderr, cfg.verbose)
-
-	loaded, err := plan.Load(cfg.dir)
-	if err != nil {
-		return err
-	}
 
 	control, err := open(ctx, cfg.dsn, controlConns)
 	if err != nil {
@@ -111,7 +103,22 @@ func runUp(ctx context.Context, cfg config, stdout, stderr io.Writer) (err error
 		err = errors.Join(err, closePool(work))
 	}()
 
-	return apply(ctx, control, work, cfg, loaded, log, stdout)
+	summary, runErr := mig.Up(ctx, control, os.DirFS(cfg.dir), mig.Options{
+		Work:       work,
+		TTL:        cfg.ttl,
+		OnLocked:   mig.OnLocked(cfg.onLocked),
+		AllowDrift: cfg.drift,
+		Version:    Version,
+		Log:        log,
+	})
+
+	if errors.Is(runErr, mig.ErrLocked) {
+		runErr = exitError{code: ExitLocked, err: runErr}
+	}
+
+	// The summary is emitted even when the run failed: it says how far the run
+	// got, which is what the next run has to reconcile against.
+	return errors.Join(runErr, emit(stdout, summary))
 }
 
 // open connects, and refuses a pooler that would discard session state.
@@ -155,59 +162,8 @@ func closePool(db *sql.DB) error {
 	return nil
 }
 
-// apply takes the lease and runs the plan under it.
-func apply(ctx context.Context, control, work *sql.DB, cfg config,
-	loaded *plan.Plan, log *slog.Logger, stdout io.Writer) error {
-	if err := ledger.EnsureSchema(ctx, control); err != nil {
-		return err
-	}
-
-	crash.At(crash.BeforeLeaseAcquire)
-
-	held, err := lease.Acquire(ctx, control, lease.Config{
-		Owner:    lease.NewOwner(),
-		TTL:      cfg.ttl,
-		OnLocked: lease.OnLocked(cfg.onLocked),
-	})
-	if err != nil {
-		if errors.Is(err, lease.ErrLocked) {
-			return exitError{code: ExitLocked, err: err}
-		}
-
-		return err
-	}
-
-	crash.At(crash.AfterLeaseAcquire)
-
-	// Losing the lease cancels the work rather than merely being logged.
-	running, stop := held.Keepalive(ctx)
-	defer stop()
-
-	executor := exec.New(control, work, exec.Options{
-		Fence:      held.Fence(),
-		AllowDrift: cfg.drift,
-		Version:    Version,
-		Log:        log,
-	})
-
-	summary, runErr := executor.Run(running, loaded)
-
-	crash.At(crash.BeforeLeaseRelease)
-
-	// The lease is handed back whether or not the run succeeded. A failed run
-	// that kept it would lock every later run out until the TTL lapsed, which
-	// turns one broken migration into a window in which nothing can be applied.
-	releaseErr := held.Release(context.WithoutCancel(ctx))
-
-	// The summary is emitted even when the run failed: it says how far the run
-	// got, which is what the next run has to reconcile against.
-	emitErr := emit(stdout, summary)
-
-	return errors.Join(runErr, releaseErr, emitErr)
-}
-
 // emit writes the machine-readable summary to stdout.
-func emit(stdout io.Writer, summary exec.Summary) error {
+func emit(stdout io.Writer, summary mig.Summary) error {
 	encoded, err := json.Marshal(summary)
 	if err != nil {
 		return fmt.Errorf("encode summary: %w", err)

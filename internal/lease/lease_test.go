@@ -396,6 +396,20 @@ func stealLease(t *testing.T, db *sql.DB) {
 func newLedger(t *testing.T) *sql.DB {
 	t.Helper()
 
+	db := openOn(t, newNamedDatabase(t))
+
+	if err := ledger.EnsureSchema(t.Context(), db); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	return db
+}
+
+// newNamedDatabase gives the test its own database, for a case that needs to
+// open more than one pool onto it.
+func newNamedDatabase(t *testing.T) string {
+	t.Helper()
+
 	if shared == nil {
 		t.Skip("postgres container not available")
 	}
@@ -405,22 +419,29 @@ func newLedger(t *testing.T) *sql.DB {
 		t.Fatalf("clone template: %v", err)
 	}
 
-	db, err := shared.Open(t.Context(), name)
-	if err != nil {
-		t.Fatalf("open clone: %v", err)
-	}
-
 	t.Cleanup(func() {
-		_ = db.Close()
-
 		if err := shared.DropDatabase(context.Background(), name); err != nil {
 			t.Errorf("drop clone %q: %v", name, err)
 		}
 	})
 
-	if err := ledger.EnsureSchema(t.Context(), db); err != nil {
-		t.Fatalf("ensure schema: %v", err)
+	return name
+}
+
+// openOn connects to a database that already exists.
+func openOn(t *testing.T, name string) *sql.DB {
+	t.Helper()
+
+	db, err := shared.Open(t.Context(), name)
+	if err != nil {
+		t.Fatalf("open %q: %v", name, err)
 	}
+
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close pool: %v", err)
+		}
+	})
 
 	return db
 }

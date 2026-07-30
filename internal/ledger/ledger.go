@@ -99,6 +99,23 @@ var schemaStatements = []string{
 	`INSERT INTO mig.lease_expiry (id) VALUES (1) ON CONFLICT (id) DO NOTHING`,
 }
 
+// presentQuery reports whether the step table has been created.
+const presentQuery = `SELECT to_regclass('mig.steps') IS NOT NULL`
+
+// Present reports whether any run has ever created the ledger.
+//
+// A read-only caller needs this because a database no run has touched has no
+// ledger at all, and that is "nothing applied yet" rather than a failure.
+func Present(ctx context.Context, db *sql.DB) (bool, error) {
+	var present bool
+
+	if err := db.QueryRowContext(ctx, presentQuery).Scan(&present); err != nil {
+		return false, fmt.Errorf("check for the ledger: %w", err)
+	}
+
+	return present, nil
+}
+
 // EnsureSchema creates the ledger schema if it is absent. It is idempotent and
 // safe to call from several runners at once.
 func EnsureSchema(ctx context.Context, db *sql.DB) (err error) {

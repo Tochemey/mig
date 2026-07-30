@@ -97,7 +97,7 @@ func (s *DDLNoTx) Repair(ctx context.Context, conn *sql.Conn) error {
 			continue
 		}
 
-		if err := dropInvalidIndex(ctx, conn, stmt.Index); err != nil {
+		if err := dropInvalidIndex(ctx, conn, stmt.Target); err != nil {
 			return fmt.Errorf("repair step %q: %w", s.meta.Name, err)
 		}
 	}
@@ -107,7 +107,7 @@ func (s *DDLNoTx) Repair(ctx context.Context, conn *sql.Conn) error {
 
 // dropInvalidIndex removes an index left behind by an interrupted build. A
 // valid index is left alone: it is the finished work.
-func dropInvalidIndex(ctx context.Context, conn *sql.Conn, target parse.Index) error {
+func dropInvalidIndex(ctx context.Context, conn *sql.Conn, target parse.Target) error {
 	index, err := catalog.LookupIndex(ctx, conn, target.Schema, target.Name)
 	if err != nil {
 		return err

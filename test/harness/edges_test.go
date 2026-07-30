@@ -87,7 +87,9 @@ func TestOpenRejectsUnknownDatabase(t *testing.T) {
 
 	db, err := h.Open(t.Context(), "no_such_database")
 	if err == nil {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Errorf("close pool: %v", err)
+		}
 		t.Fatal("Open accepted a database that does not exist")
 	}
 }

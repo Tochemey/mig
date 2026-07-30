@@ -57,7 +57,7 @@ func TestAnUnreconcilableStepStopsTheRunBeforeItStarts(t *testing.T) {
 		"20240101000000_first.sql": "ALTER TABLE users ADD COLUMN email text;\n",
 		"20240202000000_second.sql": `-- +mig step: unreconcilable
 -- +mig notx
-ALTER TYPE mood ADD VALUE 'ok';
+VACUUM users;
 `,
 	}
 

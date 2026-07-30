@@ -37,6 +37,7 @@ package harness
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -173,8 +174,7 @@ func (h *Harness) Open(ctx context.Context, database string) (*sql.DB, error) {
 	}
 
 	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("ping %q: %w", database, err)
+		return nil, errors.Join(fmt.Errorf("ping %q: %w", database, err), db.Close())
 	}
 
 	return db, nil
@@ -184,8 +184,9 @@ func (h *Harness) Open(ctx context.Context, database string) (*sql.DB, error) {
 func (h *Harness) Close(ctx context.Context) error {
 	if h.admin != nil {
 		if err := h.admin.Close(); err != nil {
-			_ = h.container.Terminate(ctx)
-			return fmt.Errorf("close maintenance connection: %w", err)
+			return errors.Join(
+				fmt.Errorf("close maintenance connection: %w", err),
+				h.container.Terminate(ctx))
 		}
 	}
 

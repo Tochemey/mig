@@ -31,10 +31,11 @@ package plan
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/tochemey/mig/internal/parse"
@@ -45,8 +46,23 @@ import (
 // Extension is the suffix of a migration file.
 const Extension = ".sql"
 
-// versionPattern is the zero-padded timestamp every migration file starts with.
-var versionPattern = regexp.MustCompile(`^(\d{14})_(.+)$`)
+const (
+	// downSuffix marks a golang-migrate rollback file, which is not loaded.
+	downSuffix = ".down" + Extension
+
+	// upSuffix marks a golang-migrate forward file. It is trimmed from the
+	// identifier so that an adopted migration is named the same whether or not
+	// the directory it came from used the convention.
+	upSuffix = ".up"
+)
+
+// versionPattern is the leading number every migration file starts with.
+//
+// The format's own version is a zero-padded timestamp, and ordering is by the
+// number rather than by the text so that a shorter sequential version — which
+// is what an adopted goose or golang-migrate history carries — sorts where it
+// belongs rather than where its digits fall.
+var versionPattern = regexp.MustCompile(`^(\d+)_(.+)$`)
 
 var (
 	// ErrNoMigrations reports a directory with no migration files.
@@ -84,14 +100,18 @@ type Step struct {
 func (s Step) Build() (step.Step, error) {
 	meta := step.Meta{Name: s.Name, Kind: s.Kind, Checksum: s.Checksum, SQL: s.SQL}
 
-	check := s.predicate()
+	var satisfied step.Predicate
+
+	if check := s.Check(); check != nil {
+		satisfied = check.Satisfied
+	}
 
 	switch s.Kind {
 	case step.KindDDLTx:
-		return step.NewDDLTx(meta, s.Statements, check), nil
+		return step.NewDDLTx(meta, s.Statements, satisfied), nil
 
 	case step.KindDDLNoTx:
-		return step.NewDDLNoTx(meta, s.Statements, check)
+		return step.NewDDLNoTx(meta, s.Statements, satisfied)
 
 	case step.KindBackfill:
 		if len(s.Statements) != 1 {
@@ -99,16 +119,19 @@ func (s Step) Build() (step.Step, error) {
 				s.Name, ErrBadBackfill, len(s.Statements))
 		}
 
-		return step.NewBackfill(meta, s.Statements[0].SQL, s.Backfill, check)
+		return step.NewBackfill(meta, s.Statements[0].SQL, s.Backfill, satisfied)
 
 	default:
 		return nil, fmt.Errorf("step %q: %w", s.Name, ErrKindUnsupported)
 	}
 }
 
-// predicate returns the author's predicate when there is one, otherwise the
+// Check returns the author's predicate when there is one, otherwise the
 // inferred one, otherwise nil.
-func (s Step) predicate() step.Predicate {
+//
+// It is exported so that the plan command can show what a run will check
+// without connecting to anything.
+func (s Step) Check() *predicate.Check {
 	if s.Satisfied != "" {
 		return predicate.SQL(s.Satisfied)
 	}
@@ -121,77 +144,108 @@ var ErrKindUnsupported = errors.New("step kind not supported yet")
 
 // Migration is one migration file.
 type Migration struct {
-	ID      string
-	Version string
-	Name    string
-	Path    string
-	Steps   []Step
+	// ID is the file name without its extension, and is what the ledger holds.
+	ID string
+
+	// Version orders the migration against its siblings.
+	Version int64
+
+	Name string
+	File string
+
+	Steps []Step
 }
 
-// Plan is the ordered set of migrations in a directory.
+// Plan is the ordered set of migrations in a source.
 type Plan struct {
-	Dir        string
 	Migrations []Migration
 }
 
 // Load reads every migration in dir, in version order.
 func Load(dir string) (*Plan, error) {
-	entries, err := os.ReadDir(dir)
+	loaded, err := LoadFS(os.DirFS(dir))
 	if err != nil {
-		return nil, fmt.Errorf("read migration directory %q: %w", dir, err)
+		return nil, fmt.Errorf("%w (in %q)", err, dir)
+	}
+
+	return loaded, nil
+}
+
+// LoadFS reads every migration from fsys, in version order.
+//
+// It takes a file system rather than a path so that a service binary can embed
+// its migrations and check them at startup without shipping the directory
+// alongside the binary.
+func LoadFS(fsys fs.FS) (*Plan, error) {
+	entries, err := fs.ReadDir(fsys, ".")
+	if err != nil {
+		return nil, fmt.Errorf("read migration directory: %w", err)
 	}
 
 	names := make([]string, 0, len(entries))
 
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), Extension) {
-			names = append(names, entry.Name())
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), Extension) {
+			continue
 		}
+
+		// A golang-migrate directory holds an up and a down file per version.
+		// Loading both would read them as two migrations claiming one version,
+		// so an adopted directory would refuse to load at all.
+		if strings.HasSuffix(entry.Name(), downSuffix) {
+			continue
+		}
+
+		names = append(names, entry.Name())
 	}
 
 	if len(names) == 0 {
-		return nil, fmt.Errorf("%w in %q", ErrNoMigrations, dir)
+		return nil, ErrNoMigrations
 	}
 
-	// Lexicographic order over zero-padded timestamps is chronological order.
-	sort.Strings(names)
-
-	plan := &Plan{Dir: dir, Migrations: make([]Migration, 0, len(names))}
-	seen := make(map[string]string, len(names))
+	migrations := make([]Migration, 0, len(names))
+	seen := make(map[int64]string, len(names))
 
 	for _, name := range names {
-		migration, err := loadMigration(dir, name)
+		migration, err := loadMigration(fsys, name)
 		if err != nil {
 			return nil, err
 		}
 
 		if previous, clash := seen[migration.Version]; clash {
-			return nil, fmt.Errorf("%w %s: %q and %q", ErrDuplicateVersion, migration.Version, previous, name)
+			return nil, fmt.Errorf("%w %d: %q and %q",
+				ErrDuplicateVersion, migration.Version, previous, name)
 		}
 
 		seen[migration.Version] = name
-		plan.Migrations = append(plan.Migrations, migration)
+		migrations = append(migrations, migration)
 	}
 
-	return plan, nil
+	sort.Slice(migrations, func(i, j int) bool {
+		return migrations[i].Version < migrations[j].Version
+	})
+
+	return &Plan{Migrations: migrations}, nil
 }
 
 // loadMigration reads and validates one migration file.
-func loadMigration(dir, name string) (Migration, error) {
-	base := strings.TrimSuffix(name, Extension)
+func loadMigration(fsys fs.FS, name string) (Migration, error) {
+	base := strings.TrimSuffix(strings.TrimSuffix(name, Extension), upSuffix)
 
 	match := versionPattern.FindStringSubmatch(base)
 	if match == nil {
 		return Migration{}, fmt.Errorf(
-			"migration %q: name must be <YYYYMMDDHHMMSS>_<name>%s", name, Extension)
+			"migration %q: name must be <version>_<name>%s", name, Extension)
 	}
 
-	path := filepath.Join(dir, name)
-
-	//nolint:gosec // G304: the path is a migration file the operator pointed us at.
-	content, err := os.ReadFile(path)
+	version, err := strconv.ParseInt(match[1], 10, 64)
 	if err != nil {
-		return Migration{}, fmt.Errorf("read migration %q: %w", path, err)
+		return Migration{}, fmt.Errorf("migration %q: version %q is not a number", name, match[1])
+	}
+
+	content, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		return Migration{}, fmt.Errorf("read migration %q: %w", name, err)
 	}
 
 	steps, err := scan(string(content))
@@ -205,9 +259,9 @@ func loadMigration(dir, name string) (Migration, error) {
 
 	return Migration{
 		ID:      base,
-		Version: match[1],
+		Version: version,
 		Name:    match[2],
-		Path:    path,
+		File:    name,
 		Steps:   steps,
 	}, nil
 }

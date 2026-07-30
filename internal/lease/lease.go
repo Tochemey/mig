@@ -137,12 +137,17 @@ type Lease struct {
 // holder is part-way through a commit. Expiry is judged by the server's clock,
 // so runners whose own clocks disagree still agree on whether a lease lapsed.
 const (
+	// Both rows are locked, not just the lease. A waiter that blocks here
+	// re-reads the rows it locked once the lock clears, and only those: with
+	// the expiry row unlocked it would re-read the new owner beside the old
+	// row's expiry, see the NULL that stood there before the winner set it,
+	// conclude the lease had lapsed, and take a lease someone else holds.
 	claimQuery = `
 SELECT l.owner IS NULL OR e.expires_at IS NULL OR e.expires_at < now()
   FROM mig.lease l
   JOIN mig.lease_expiry e ON e.id = l.id
  WHERE l.id = 1
-   FOR UPDATE OF l`
+   FOR UPDATE OF l, e`
 
 	takeQuery = `
 UPDATE mig.lease

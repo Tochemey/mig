@@ -25,10 +25,13 @@ package plan_test
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/tochemey/mig/internal/plan"
 	"github.com/tochemey/mig/internal/step"
@@ -63,8 +66,8 @@ CREATE INDEX CONCURRENTLY idx_users_email ON users (email);
 		t.Fatalf("id is %q", migration.ID)
 	}
 
-	if migration.Version != "20240817120000" || migration.Name != "add_email" {
-		t.Fatalf("version %q name %q", migration.Version, migration.Name)
+	if migration.Version != 20240817120000 || migration.Name != "add_email" {
+		t.Fatalf("version %d name %q", migration.Version, migration.Name)
 	}
 
 	if len(migration.Steps) != 2 {
@@ -136,11 +139,11 @@ func TestLoadNamesImplicitSteps(t *testing.T) {
 // predicate cannot be inferred.
 func TestLoadReadsSatisfiedAnnotation(t *testing.T) {
 	dir := write(t, map[string]string{
-		"20240817120000_enum.sql": `
--- +mig step: add_enum_value
+		"20240817120000_vacuum.sql": `
+-- +mig step: vacuum_users
 -- +mig notx
 -- +mig satisfied: sql(SELECT EXISTS (SELECT 1 FROM pg_enum WHERE enumlabel = 'ok'))
-ALTER TYPE mood ADD VALUE IF NOT EXISTS 'ok';
+VACUUM users;
 `,
 	})
 
@@ -157,7 +160,7 @@ ALTER TYPE mood ADD VALUE IF NOT EXISTS 'ok';
 	}
 
 	// With an author-supplied predicate the step is buildable even though
-	// nothing about ALTER TYPE can be inferred.
+	// nothing about VACUUM can be inferred.
 	if _, err := got.Build(); err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -190,10 +193,10 @@ ALTER TABLE users ADD COLUMN email text;
 // than leaving the database in a state nobody can reason about.
 func TestBuildRefusesUnreconcilableNoTxStep(t *testing.T) {
 	dir := write(t, map[string]string{
-		"20240817120000_enum.sql": `
--- +mig step: add_enum_value
+		"20240817120000_vacuum.sql": `
+-- +mig step: vacuum_users
 -- +mig notx
-ALTER TYPE mood ADD VALUE 'ok';
+VACUUM users;
 `,
 	})
 
@@ -455,9 +458,11 @@ SELECT 2;
 }
 
 // TestLoadRejectsMalformedNames covers file names that carry no usable version,
-// which would make the apply order arbitrary.
+// which would make the apply order arbitrary. Any number of digits is a version,
+// because an adopted history counts from 1; what is refused is a name with no
+// leading number, or a number with no name after it.
 func TestLoadRejectsMalformedNames(t *testing.T) {
-	for _, name := range []string{"add_email.sql", "2024_add_email.sql", "20240817120000.sql"} {
+	for _, name := range []string{"add_email.sql", "_add_email.sql", "20240817120000.sql"} {
 		t.Run(name, func(t *testing.T) {
 			dir := write(t, map[string]string{name: "SELECT 1;\n"})
 
@@ -519,4 +524,148 @@ func write(t *testing.T, files map[string]string) string {
 	}
 
 	return dir
+}
+
+// An adopted history is the reason versions are numbers rather than text: goose
+// and golang-migrate both count from 1, and a shorter version has to sort by
+// what it is worth rather than by where its digits fall.
+
+// TestLoadOrdersByVersionNotByName covers exactly that: 2 before 10.
+func TestLoadOrdersByVersionNotByName(t *testing.T) {
+	dir := write(t, map[string]string{
+		"10_third.sql": "CREATE TABLE c (id bigint PRIMARY KEY);\n",
+		"2_second.sql": "CREATE TABLE b (id bigint PRIMARY KEY);\n",
+		"1_first.sql":  "CREATE TABLE a (id bigint PRIMARY KEY);\n",
+	})
+
+	loaded, err := plan.Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	var ids []string
+	for _, migration := range loaded.Migrations {
+		ids = append(ids, migration.ID)
+	}
+
+	want := []string{"1_first", "2_second", "10_third"}
+	if !slices.Equal(ids, want) {
+		t.Fatalf("order is %v, want %v", ids, want)
+	}
+}
+
+// TestLoadIgnoresRollbackFiles covers a golang-migrate directory, which holds an
+// up and a down file for every version. Reading both would make each version
+// look duplicated and the whole directory unloadable.
+func TestLoadIgnoresRollbackFiles(t *testing.T) {
+	dir := write(t, map[string]string{
+		"1_create_users.up.sql":   "CREATE TABLE users (id bigint PRIMARY KEY);\n",
+		"1_create_users.down.sql": "DROP TABLE users;\n",
+	})
+
+	loaded, err := plan.Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	if len(loaded.Migrations) != 1 {
+		t.Fatalf("got %d migrations, want 1", len(loaded.Migrations))
+	}
+
+	migration := loaded.Migrations[0]
+
+	if migration.ID != "1_create_users" {
+		t.Fatalf("id is %q, want the .up suffix trimmed", migration.ID)
+	}
+
+	if migration.File != "1_create_users.up.sql" {
+		t.Fatalf("file is %q, want the name on disk", migration.File)
+	}
+}
+
+// TestLoadFSReadsAnEmbeddedDirectory covers the shape a service binary uses: no
+// directory shipped alongside it, migrations compiled in.
+func TestLoadFSReadsAnEmbeddedDirectory(t *testing.T) {
+	loaded, err := plan.LoadFS(fstest.MapFS{
+		"20240817120000_add_email.sql": &fstest.MapFile{
+			Data: []byte("ALTER TABLE users ADD COLUMN email text;\n"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	if len(loaded.Migrations) != 1 || len(loaded.Migrations[0].Steps) != 1 {
+		t.Fatalf("loaded %+v", loaded)
+	}
+}
+
+// TestLoadFSRejectsAnEmptyFS covers a caller who embedded the wrong path, which
+// is otherwise silent: nothing to apply looks exactly like nothing to do.
+func TestLoadFSRejectsAnEmptyFS(t *testing.T) {
+	if _, err := plan.LoadFS(fstest.MapFS{}); !errors.Is(err, plan.ErrNoMigrations) {
+		t.Fatalf("load returned %v, want ErrNoMigrations", err)
+	}
+}
+
+// TestLoadRejectsAVersionTooLargeToOrder covers a name whose digits do not fit
+// the number that orders it.
+func TestLoadRejectsAVersionTooLargeToOrder(t *testing.T) {
+	dir := write(t, map[string]string{
+		"99999999999999999999999_huge.sql": "CREATE TABLE a (id bigint PRIMARY KEY);\n",
+	})
+
+	if _, err := plan.Load(dir); err == nil {
+		t.Fatal("load accepted a version that does not fit")
+	}
+}
+
+// TestLoadRejectsUnreadableFile covers a directory entry that lists but cannot
+// be read, which is what a permission change between the two calls looks like.
+func TestLoadRejectsUnreadableFile(t *testing.T) {
+	listable := unreadableFS{files: fstest.MapFS{
+		"1_unreadable.sql": &fstest.MapFile{Data: []byte("SELECT 1;\n")},
+	}}
+
+	if _, err := plan.LoadFS(listable); err == nil {
+		t.Fatal("load accepted a file it cannot read")
+	}
+}
+
+// unreadableFS lists its entries and refuses to open them, so that the read
+// fails after the listing has already succeeded.
+type unreadableFS struct {
+	files fstest.MapFS
+}
+
+// ReadDir lists, as the real directory did a moment earlier.
+func (u unreadableFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	return u.files.ReadDir(name)
+}
+
+// Open always fails.
+func (unreadableFS) Open(name string) (fs.File, error) {
+	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrPermission}
+}
+
+// TestLoadIgnoresNonMigrationEntries covers a directory holding a README and a
+// subdirectory next to the migrations.
+func TestLoadIgnoresNonMigrationEntries(t *testing.T) {
+	dir := write(t, map[string]string{
+		"1_first.sql": "CREATE TABLE a (id bigint PRIMARY KEY);\n",
+		"README.md":   "not a migration\n",
+	})
+
+	if err := os.Mkdir(filepath.Join(dir, "archive.sql"), 0o750); err != nil {
+		t.Fatalf("make the subdirectory: %v", err)
+	}
+
+	loaded, err := plan.Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	if len(loaded.Migrations) != 1 {
+		t.Fatalf("got %d migrations, want 1", len(loaded.Migrations))
+	}
 }

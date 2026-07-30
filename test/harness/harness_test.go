@@ -81,7 +81,9 @@ func TestCloneFromTemplate(t *testing.T) {
 	}
 
 	t.Cleanup(func() {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Errorf("close pool: %v", err)
+		}
 	})
 
 	var rows int
@@ -108,7 +110,9 @@ func TestClonesAreIsolated(t *testing.T) {
 	}
 
 	t.Cleanup(func() {
-		_ = one.Close()
+		if err := one.Close(); err != nil {
+			t.Errorf("close first pool: %v", err)
+		}
 	})
 
 	if _, err := one.ExecContext(ctx, "ALTER TABLE users ADD COLUMN email text"); err != nil {
@@ -121,7 +125,9 @@ func TestClonesAreIsolated(t *testing.T) {
 	}
 
 	t.Cleanup(func() {
-		_ = two.Close()
+		if err := two.Close(); err != nil {
+			t.Errorf("close second pool: %v", err)
+		}
 	})
 
 	var exists bool

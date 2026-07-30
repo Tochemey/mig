@@ -248,7 +248,9 @@ func TestLockTimeoutIsEnforced(t *testing.T) {
 	}
 
 	defer func() {
-		_ = blocker.Close()
+		if err := blocker.Close(); err != nil {
+			t.Errorf("close blocker: %v", err)
+		}
 	}()
 
 	tx, err := blocker.BeginTx(ctx, nil)
@@ -270,7 +272,9 @@ func TestLockTimeoutIsEnforced(t *testing.T) {
 	}
 
 	defer func() {
-		_ = victim.Close()
+		if err := victim.Close(); err != nil {
+			t.Errorf("close victim: %v", err)
+		}
 	}()
 
 	cfg := session.Config{Application: "mig/test", LockTimeout: 200 * time.Millisecond}
@@ -306,7 +310,9 @@ func newDatabase(t *testing.T) *sql.DB {
 	}
 
 	t.Cleanup(func() {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Errorf("close pool: %v", err)
+		}
 
 		if err := shared.DropDatabase(context.Background(), name); err != nil {
 			t.Errorf("drop clone %q: %v", name, err)
@@ -326,7 +332,10 @@ func newConn(t *testing.T) *sql.Conn {
 	}
 
 	t.Cleanup(func() {
-		_ = conn.Close()
+		// A test that closed the connection itself has already made its point.
+		if err := conn.Close(); err != nil && !errors.Is(err, sql.ErrConnDone) {
+			t.Errorf("close connection: %v", err)
+		}
 	})
 
 	return conn

@@ -328,7 +328,9 @@ func openLedger(t *testing.T, database string) *sql.DB {
 	}
 
 	t.Cleanup(func() {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			t.Errorf("close pool: %v", err)
+		}
 	})
 
 	return db
