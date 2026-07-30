@@ -130,9 +130,10 @@ SELECT format('%s status=%s', id, status)
 			// is still running.
 			name: "lease still held",
 			query: `
-SELECT format('owner=%s fence=%s expires_at=%s', owner, fence, expires_at)
-  FROM mig.lease
- WHERE owner IS NOT NULL AND expires_at > now()`,
+SELECT format('owner=%s fence=%s expires_at=%s', l.owner, l.fence, e.expires_at)
+  FROM mig.lease l
+  JOIN mig.lease_expiry e ON e.id = l.id
+ WHERE l.owner IS NOT NULL AND e.expires_at > now()`,
 		},
 		{
 			name: "session idle in transaction",

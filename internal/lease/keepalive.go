@@ -34,12 +34,17 @@ import (
 
 // renewQuery extends the lease, and only for the runner that still holds it.
 // Matching no row means the lease was taken and retrying cannot recover it.
+//
+// Ownership is read rather than written. A reader never queues behind the row
+// lock a ledger write holds, so renewal keeps running while a batch that may
+// last minutes is in flight.
 const renewQuery = `
-UPDATE mig.lease
+UPDATE mig.lease_expiry
    SET expires_at   = now() + make_interval(secs => $3),
        heartbeat_at = now()
- WHERE id = 1 AND owner = $1 AND fence = $2
-RETURNING fence`
+ WHERE id = 1
+   AND EXISTS (SELECT 1 FROM mig.lease WHERE id = 1 AND owner = $1 AND fence = $2)
+RETURNING id`
 
 // Keepalive renews the lease in the background and returns a context that is
 // cancelled once the lease is no longer safely held, plus a function that
@@ -116,9 +121,9 @@ func (l *Lease) renew(ctx context.Context, cancel context.CancelCauseFunc, stop 
 // renewOnce extends the lease by one TTL, reporting [ErrLost] when the lease
 // has been taken.
 func (l *Lease) renewOnce(ctx context.Context) error {
-	var fence int64
+	var id int
 
-	err := l.db.QueryRowContext(ctx, renewQuery, l.fence.Owner, l.fence.Token, l.ttl.Seconds()).Scan(&fence)
+	err := l.db.QueryRowContext(ctx, renewQuery, l.fence.Owner, l.fence.Token, l.ttl.Seconds()).Scan(&id)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: fence %s no longer holds it", ErrLost, l.fence)

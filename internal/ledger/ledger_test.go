@@ -303,13 +303,14 @@ func takeLease(t *testing.T, db *sql.DB, token int64) ledger.Fence {
 
 	owner := "owner-" + t.Name()
 
-	const query = `
-UPDATE mig.lease
-   SET owner = $1, fence = $2, expires_at = now() + interval '1 hour', heartbeat_at = now()
- WHERE id = 1`
-
-	if _, err := db.ExecContext(t.Context(), query, owner, token); err != nil {
+	if _, err := db.ExecContext(t.Context(),
+		`UPDATE mig.lease SET owner = $1, fence = $2 WHERE id = 1`, owner, token); err != nil {
 		t.Fatalf("take lease at fence %d: %v", token, err)
+	}
+
+	if _, err := db.ExecContext(t.Context(),
+		`UPDATE mig.lease_expiry SET expires_at = now() + interval '1 hour' WHERE id = 1`); err != nil {
+		t.Fatalf("start lease expiry: %v", err)
 	}
 
 	return ledger.Fence{Owner: owner, Token: token}

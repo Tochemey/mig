@@ -66,6 +66,19 @@ const (
 	// AfterCommit fires once a transactional step's DDL and its ledger row have
 	// committed together.
 	AfterCommit = "after_commit"
+
+	// MidBatch fires with a backfill's rows written and nothing committed.
+	// Everything must roll back, cursor included.
+	MidBatch = "mid_batch"
+
+	// AfterCheckpoint fires once a batch and the cursor covering it have
+	// committed together. The next run resumes from that cursor and must not
+	// rewrite what it already covers.
+	AfterCheckpoint = "after_checkpoint"
+
+	// DuringThrottle fires between batches, while the backfill is pacing
+	// itself.
+	DuringThrottle = "during_throttle"
 )
 
 // At terminates the process when point is the armed crash point, and does
@@ -97,5 +110,8 @@ func Points() []string {
 		DuringRepair,
 		InTransaction,
 		AfterCommit,
+		MidBatch,
+		AfterCheckpoint,
+		DuringThrottle,
 	}
 }

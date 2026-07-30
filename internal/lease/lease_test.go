@@ -358,7 +358,7 @@ func waitForExpiry(t *testing.T, db *sql.DB) {
 	for {
 		var expired bool
 
-		const query = `SELECT coalesce(expires_at < now(), true) FROM mig.lease WHERE id = 1`
+		const query = `SELECT coalesce(expires_at < now(), true) FROM mig.lease_expiry WHERE id = 1`
 
 		if err := db.QueryRowContext(t.Context(), query).Scan(&expired); err != nil {
 			t.Fatalf("check lease expiry: %v", err)
@@ -380,14 +380,15 @@ func waitForExpiry(t *testing.T, db *sql.DB) {
 func stealLease(t *testing.T, db *sql.DB) {
 	t.Helper()
 
-	const query = `
-UPDATE mig.lease
-   SET owner = 'thief', fence = fence + 1,
-       expires_at = now() + interval '1 hour', heartbeat_at = now()
- WHERE id = 1`
+	statements := []string{
+		`UPDATE mig.lease SET owner = 'thief', fence = fence + 1 WHERE id = 1`,
+		`UPDATE mig.lease_expiry SET expires_at = now() + interval '1 hour', heartbeat_at = now() WHERE id = 1`,
+	}
 
-	if _, err := db.ExecContext(t.Context(), query); err != nil {
-		t.Fatalf("steal lease: %v", err)
+	for _, stmt := range statements {
+		if _, err := db.ExecContext(t.Context(), stmt); err != nil {
+			t.Fatalf("steal lease: %v", err)
+		}
 	}
 }
 

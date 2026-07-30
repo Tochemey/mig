@@ -160,3 +160,58 @@ func LoadStep(ctx context.Context, db *sql.DB, key StepKey) (Step, error) {
 
 	return step, nil
 }
+
+const setCheckpointQuery = `
+UPDATE mig.steps
+   SET checkpoint = $3
+ WHERE migration_id = $1 AND idx = $2
+RETURNING idx`
+
+// SetCheckpoint records a resumable step's progress. It must be called inside
+// the transaction that performs the work the progress describes.
+//
+// Committing the two together is what makes "the work landed but the cursor did
+// not" impossible. An index build cannot be made atomic with its ledger row; a
+// batch and its cursor can, so they are.
+func SetCheckpoint(ctx context.Context, tx *sql.Tx, key StepKey, state []byte) error {
+	var idx int
+
+	err := tx.QueryRowContext(ctx, setCheckpointQuery, key.MigrationID, key.Index, state).Scan(&idx)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("checkpoint step %s: %w", key, ErrNotRecorded)
+	}
+
+	if err != nil {
+		return fmt.Errorf("checkpoint step %s: %w", key, err)
+	}
+
+	return nil
+}
+
+const loadCheckpointQuery = `
+SELECT coalesce(checkpoint, 'null'::jsonb)
+  FROM mig.steps
+ WHERE migration_id = $1 AND idx = $2`
+
+// LoadCheckpoint reads a resumable step's progress, returning nil when it has
+// none yet.
+func LoadCheckpoint(ctx context.Context, db *sql.DB, key StepKey) ([]byte, error) {
+	var state []byte
+
+	err := db.QueryRowContext(ctx, loadCheckpointQuery, key.MigrationID, key.Index).Scan(&state)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("load checkpoint of step %s: %w", key, ErrNotRecorded)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("load checkpoint of step %s: %w", key, err)
+	}
+
+	if string(state) == "null" {
+		return nil, nil
+	}
+
+	return state, nil
+}

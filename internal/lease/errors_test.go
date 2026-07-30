@@ -25,11 +25,13 @@ package lease_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/tochemey/mig/internal/lease"
+	"github.com/tochemey/mig/internal/ledger"
 )
 
 // TestAcquireAppliesDefaults covers the zero configuration, which is what an
@@ -161,6 +163,60 @@ func TestKeepaliveGivesUpAfterRepeatedFailures(t *testing.T) {
 
 	case <-time.After(10 * time.Second):
 		t.Fatal("keepalive kept working with an unreachable database")
+	}
+}
+
+// TestKeepaliveOutlivesALongLedgerWrite is why ownership and expiry are
+// separate rows.
+//
+// A backfill commits its cursor inside the transaction that writes its batch,
+// so that transaction holds the lock on the ownership row for as long as the
+// batch takes. If the heartbeat wrote that same row it would queue behind the
+// batch, and the holder would give up a lease nobody else wanted — under
+// exactly the load the lease exists to survive.
+func TestKeepaliveOutlivesALongLedgerWrite(t *testing.T) {
+	db := newLedger(t)
+	ctx := t.Context()
+
+	cfg := config(t, lease.Fail)
+	cfg.TTL = 600 * time.Millisecond
+
+	held, err := lease.Acquire(ctx, db, cfg)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	work, stop := held.Keepalive(ctx)
+	defer stop()
+
+	// A fenced write that stays open far longer than the whole TTL, as a batch
+	// over a large table does.
+	const hold = 3 * time.Second
+
+	writeDone := make(chan error, 1)
+
+	go func() {
+		writeDone <- ledger.Write(ctx, db, held.Fence(), func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, "SELECT pg_sleep($1)", hold.Seconds())
+			return err
+		})
+	}()
+
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("long fenced write: %v", err)
+		}
+
+	case <-work.Done():
+		t.Fatalf("the lease was given up while a batch was in flight: %v", context.Cause(work))
+
+	case <-time.After(hold + 10*time.Second):
+		t.Fatal("the long write never finished")
+	}
+
+	if err := work.Err(); err != nil {
+		t.Fatalf("lease reported lost after the write: %v (cause %v)", err, context.Cause(work))
 	}
 }
 

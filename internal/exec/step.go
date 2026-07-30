@@ -28,6 +28,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/tochemey/mig/internal/crash"
@@ -35,6 +36,7 @@ import (
 	"github.com/tochemey/mig/internal/plan"
 	"github.com/tochemey/mig/internal/session"
 	"github.com/tochemey/mig/internal/step"
+	"github.com/tochemey/mig/internal/throttle"
 )
 
 // stepRun is one step's execution: what to run, where it runs, and what will be
@@ -94,6 +96,9 @@ func (e *Executor) runStep(ctx context.Context, migration plan.Migration, spec p
 
 	case step.NoTxStep:
 		return e.runNoTxStep(ctx, run, applier, summary)
+
+	case step.ResumableStep:
+		return e.runResumableStep(ctx, run, applier, summary)
 
 	default:
 		return fmt.Errorf("step %s: %w", run.key, plan.ErrKindUnsupported)
@@ -390,4 +395,109 @@ func (e *Executor) fail(ctx context.Context, key ledger.StepKey, cause error) er
 	}
 
 	return cause
+}
+
+// runResumableStep applies a step that records its progress as it goes.
+//
+// It is handed a way to open a fenced transaction on the work pool and a way to
+// write its checkpoint into that same transaction, so a batch cannot commit
+// without the cursor covering it.
+func (e *Executor) runResumableStep(ctx context.Context, run *stepRun,
+	work step.ResumableStep, summary *Summary) error {
+	attempts, err := e.beginAttempt(ctx, run.key)
+	if err != nil {
+		return err
+	}
+
+	run.result.Attempts = attempts
+
+	env := step.Env{
+		Begin: func(ctx context.Context) (*sql.Tx, error) {
+			return e.beginFenced(ctx)
+		},
+		Checkpoint: func(ctx context.Context, tx *sql.Tx, state []byte) error {
+			return ledger.SetCheckpoint(ctx, tx, run.key, state)
+		},
+		Load: func(ctx context.Context) ([]byte, error) {
+			return ledger.LoadCheckpoint(ctx, e.control, run.key)
+		},
+		Read: func(ctx context.Context, query string, args ...any) *sql.Row {
+			return e.work.QueryRowContext(ctx, query, args...)
+		},
+		Retry: func(ctx context.Context, batch func(context.Context) error) error {
+			return session.WithLockRetry(ctx, e.opts.Retry, batch)
+		},
+		Throttle: throttle.New(throttle.Config{
+			Batch:       run.spec.Backfill.Batch,
+			MaxLagBytes: run.spec.Backfill.MaxLagBytes,
+			Lag:         throttle.Replication(e.control),
+		}),
+		Report: func(cursor step.Cursor) {
+			e.opts.Log.Info("backfill progress",
+				"step", run.key.String(), "cursor", cursor.Position, "rows", cursor.Rows)
+		},
+	}
+
+	if err := work.Run(ctx, env); err != nil {
+		return e.fail(ctx, run.key, err)
+	}
+
+	// The postcondition. A backfill that walked its whole key range and left
+	// rows behind has not done its job, and recording it as done would hide
+	// them.
+	done, err := work.Satisfied(ctx, run.conn)
+	if err != nil {
+		return e.fail(ctx, run.key, fmt.Errorf("check step %s after backfill: %w", run.key, err))
+	}
+
+	if !done {
+		return e.fail(ctx, run.key, fmt.Errorf("step %s: %w", run.key, ErrPostconditionFailed))
+	}
+
+	run.result.Status = string(ledger.StatusSucceeded)
+	summary.apply(run.result, run.started)
+
+	return e.succeed(ctx, run.key)
+}
+
+// setLocalLockTimeout bounds lock waits for one transaction.
+//
+// Batches run on the work pool rather than on a pinned connection, so the
+// timeout is set on the transaction instead of the session. Without it a batch
+// blocked on a row lock waits forever, and because Postgres orders lock
+// requests, every later query wanting that table queues behind it.
+const setLocalLockTimeout = "SELECT set_config('lock_timeout', $1, true)"
+
+// beginFenced opens a transaction on the work pool with the lease fence already
+// asserted, so a batch cannot be written by a runner that has been superseded.
+func (e *Executor) beginFenced(ctx context.Context) (*sql.Tx, error) {
+	tx, err := e.work.BeginTx(ctx, ledger.TxOptions())
+	if err != nil {
+		return nil, fmt.Errorf("begin batch: %w", err)
+	}
+
+	if err := e.prepareBatch(ctx, tx); err != nil {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			return nil, errors.Join(err, fmt.Errorf("roll back batch: %w", rollbackErr))
+		}
+
+		return nil, err
+	}
+
+	return tx, nil
+}
+
+// prepareBatch bounds the transaction's lock waits and asserts the fence.
+//
+// The timeout comes first so that it covers the fence check too: asserting the
+// fence takes the lease row, and an acquisition in flight would otherwise block
+// the batch indefinitely.
+func (e *Executor) prepareBatch(ctx context.Context, tx *sql.Tx) error {
+	timeout := strconv.FormatInt(session.DefaultLockTimeout.Milliseconds(), 10)
+
+	if _, err := tx.ExecContext(ctx, setLocalLockTimeout, timeout); err != nil {
+		return fmt.Errorf("set lock timeout for batch: %w", err)
+	}
+
+	return ledger.Guard(ctx, tx, e.opts.Fence)
 }

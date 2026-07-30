@@ -130,18 +130,31 @@ type Lease struct {
 	renewedAt time.Time
 }
 
-// acquireQuery takes the lease when it is free or expired, and bumps the
-// fence. Expiry is judged by the server's clock so that runners whose own
-// clocks disagree still agree on whether a lease has lapsed.
-const acquireQuery = `
+// The three statements of an acquisition, run in one transaction.
+//
+// Locking the ownership row first serialises acquirers against each other and
+// against any in-flight ledger write, so a lease cannot be taken while its
+// holder is part-way through a commit. Expiry is judged by the server's clock,
+// so runners whose own clocks disagree still agree on whether a lease lapsed.
+const (
+	claimQuery = `
+SELECT l.owner IS NULL OR e.expires_at IS NULL OR e.expires_at < now()
+  FROM mig.lease l
+  JOIN mig.lease_expiry e ON e.id = l.id
+ WHERE l.id = 1
+   FOR UPDATE OF l`
+
+	takeQuery = `
 UPDATE mig.lease
-   SET owner        = $1,
-       fence        = fence + 1,
-       expires_at   = now() + make_interval(secs => $2),
-       heartbeat_at = now()
+   SET owner = $1, fence = fence + 1
  WHERE id = 1
-   AND (owner IS NULL OR expires_at < now())
 RETURNING fence`
+
+	startExpiryQuery = `
+UPDATE mig.lease_expiry
+   SET expires_at = now() + make_interval(secs => $1), heartbeat_at = now()
+ WHERE id = 1`
+)
 
 // NewOwner builds an owner identifier from host, process and a random suffix.
 // The random suffix keeps two processes that share a pid in different
@@ -199,17 +212,40 @@ func Acquire(ctx context.Context, db *sql.DB, cfg Config) (*Lease, error) {
 }
 
 // tryAcquire makes one attempt, reporting whether the lease was taken.
-func tryAcquire(ctx context.Context, db *sql.DB, cfg Config) (int64, bool, error) {
-	var fence int64
+func tryAcquire(ctx context.Context, db *sql.DB, cfg Config) (_ int64, _ bool, err error) {
+	tx, err := db.BeginTx(ctx, ledger.TxOptions())
+	if err != nil {
+		return 0, false, fmt.Errorf("begin lease acquisition: %w", err)
+	}
 
-	err := db.QueryRowContext(ctx, acquireQuery, cfg.Owner, cfg.TTL.Seconds()).Scan(&fence)
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			err = errors.Join(err, fmt.Errorf("roll back lease acquisition: %w", rollbackErr))
+		}
+	}()
 
-	if errors.Is(err, sql.ErrNoRows) {
+	var free bool
+
+	if err := tx.QueryRowContext(ctx, claimQuery).Scan(&free); err != nil {
+		return 0, false, fmt.Errorf("read lease: %w", err)
+	}
+
+	if !free {
 		return 0, false, nil
 	}
 
-	if err != nil {
-		return 0, false, fmt.Errorf("acquire lease: %w", err)
+	var fence int64
+
+	if err := tx.QueryRowContext(ctx, takeQuery, cfg.Owner).Scan(&fence); err != nil {
+		return 0, false, fmt.Errorf("take lease: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, startExpiryQuery, cfg.TTL.Seconds()); err != nil {
+		return 0, false, fmt.Errorf("start lease expiry: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, false, fmt.Errorf("commit lease acquisition: %w", err)
 	}
 
 	return fence, true, nil
@@ -229,26 +265,52 @@ func (l *Lease) TTL() time.Duration {
 // enforces the fence without a second round trip.
 const releaseQuery = `
 UPDATE mig.lease
-   SET owner = NULL, expires_at = NULL, heartbeat_at = NULL
+   SET owner = NULL
  WHERE id = 1 AND owner = $1 AND fence = $2
 RETURNING fence`
+
+// clearExpiryQuery lapses the lease so the next runner need not wait out the
+// TTL. It runs in the same transaction as the release.
+const clearExpiryQuery = `
+UPDATE mig.lease_expiry
+   SET expires_at = NULL, heartbeat_at = NULL
+ WHERE id = 1`
 
 // Release hands the lease back so the next runner need not wait out the TTL.
 //
 // It is itself fenced. A superseded runner releasing a lease it no longer
 // holds would hand a third runner a lease the real holder is still using;
 // releasing what the caller no longer owns returns [ledger.ErrFenced].
-func (l *Lease) Release(ctx context.Context) error {
+func (l *Lease) Release(ctx context.Context) (err error) {
+	tx, err := l.db.BeginTx(ctx, ledger.TxOptions())
+	if err != nil {
+		return fmt.Errorf("begin lease release: %w", err)
+	}
+
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			err = errors.Join(err, fmt.Errorf("roll back lease release: %w", rollbackErr))
+		}
+	}()
+
 	var fence int64
 
-	err := l.db.QueryRowContext(ctx, releaseQuery, l.fence.Owner, l.fence.Token).Scan(&fence)
+	scanErr := tx.QueryRowContext(ctx, releaseQuery, l.fence.Owner, l.fence.Token).Scan(&fence)
 
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(scanErr, sql.ErrNoRows) {
 		return fmt.Errorf("release lease %s: %w", l.fence, ledger.ErrFenced)
 	}
 
-	if err != nil {
-		return fmt.Errorf("release lease %s: %w", l.fence, err)
+	if scanErr != nil {
+		return fmt.Errorf("release lease %s: %w", l.fence, scanErr)
+	}
+
+	if _, err := tx.ExecContext(ctx, clearExpiryQuery); err != nil {
+		return fmt.Errorf("clear lease expiry: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit lease release: %w", err)
 	}
 
 	return nil

@@ -43,9 +43,15 @@ import (
 	"github.com/tochemey/mig/internal/session"
 )
 
-// controlConns caps the control pool. Ledger and lease traffic stay on their
-// own pool so a saturated work pool cannot starve the heartbeat.
-const controlConns = 2
+const (
+	// controlConns caps the control pool, which carries ledger and lease
+	// traffic only.
+	controlConns = 2
+
+	// workConns caps the pool batches run on. Steps run one at a time, so one
+	// connection does the work and the second covers the bounds read.
+	workConns = 2
+)
 
 // newUpCommand builds the command that applies pending steps.
 func newUpCommand() *cobra.Command {
@@ -81,7 +87,7 @@ func runUp(ctx context.Context, cfg config, stdout, stderr io.Writer) (err error
 		return err
 	}
 
-	control, err := open(ctx, cfg.dsn)
+	control, err := open(ctx, cfg.dsn, controlConns)
 	if err != nil {
 		return err
 	}
@@ -94,17 +100,28 @@ func runUp(ctx context.Context, cfg config, stdout, stderr io.Writer) (err error
 		err = errors.Join(err, closePool(control))
 	}()
 
-	return apply(ctx, control, cfg, loaded, log, stdout)
+	// Batches run on their own pool, so that a backfill holding connections
+	// cannot starve the heartbeat that keeps its lease alive.
+	work, err := open(ctx, cfg.dsn, workConns)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		err = errors.Join(err, closePool(work))
+	}()
+
+	return apply(ctx, control, work, cfg, loaded, log, stdout)
 }
 
 // open connects, and refuses a pooler that would discard session state.
-func open(ctx context.Context, dsn string) (*sql.DB, error) {
+func open(ctx context.Context, dsn string, conns int) (*sql.DB, error) {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	db.SetMaxOpenConns(controlConns)
+	db.SetMaxOpenConns(conns)
 
 	if err := probe(ctx, db); err != nil {
 		return nil, errors.Join(err, closePool(db))
@@ -129,17 +146,17 @@ func probe(ctx context.Context, db *sql.DB) (err error) {
 	return session.DetectPooling(ctx, conn)
 }
 
-// closePool closes the control pool.
+// closePool closes a pool.
 func closePool(db *sql.DB) error {
 	if err := db.Close(); err != nil {
-		return fmt.Errorf("close control pool: %w", err)
+		return fmt.Errorf("close pool: %w", err)
 	}
 
 	return nil
 }
 
 // apply takes the lease and runs the plan under it.
-func apply(ctx context.Context, control *sql.DB, cfg config,
+func apply(ctx context.Context, control, work *sql.DB, cfg config,
 	loaded *plan.Plan, log *slog.Logger, stdout io.Writer) error {
 	if err := ledger.EnsureSchema(ctx, control); err != nil {
 		return err
@@ -163,17 +180,17 @@ func apply(ctx context.Context, control *sql.DB, cfg config,
 	crash.At(crash.AfterLeaseAcquire)
 
 	// Losing the lease cancels the work rather than merely being logged.
-	work, stop := held.Keepalive(ctx)
+	running, stop := held.Keepalive(ctx)
 	defer stop()
 
-	executor := exec.New(control, exec.Options{
+	executor := exec.New(control, work, exec.Options{
 		Fence:      held.Fence(),
 		AllowDrift: cfg.drift,
 		Version:    Version,
 		Log:        log,
 	})
 
-	summary, runErr := executor.Run(work, loaded)
+	summary, runErr := executor.Run(running, loaded)
 
 	crash.At(crash.BeforeLeaseRelease)
 

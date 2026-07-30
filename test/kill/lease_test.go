@@ -400,7 +400,7 @@ func waitForLeaseExpiry(t *testing.T, database string) {
 	for {
 		var expired bool
 
-		const query = `SELECT coalesce(expires_at < now(), true) FROM mig.lease WHERE id = 1`
+		const query = `SELECT coalesce(expires_at < now(), true) FROM mig.lease_expiry WHERE id = 1`
 
 		if err := db.QueryRowContext(t.Context(), query).Scan(&expired); err != nil {
 			t.Fatalf("check lease expiry: %v", err)

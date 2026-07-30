@@ -81,11 +81,16 @@ type Options struct {
 // Executor applies migrations.
 type Executor struct {
 	control *sql.DB
+	work    *sql.DB
 	opts    Options
 }
 
-// New builds an executor over the control pool.
-func New(control *sql.DB, opts Options) *Executor {
+// New builds an executor over the control and work pools.
+//
+// Batch traffic is kept off the control pool so that a backfill saturating its
+// connections cannot starve the heartbeat, which is how a lease gets lost under
+// exactly the load it exists to survive.
+func New(control, work *sql.DB, opts Options) *Executor {
 	if opts.Log == nil {
 		opts.Log = slog.New(slog.DiscardHandler)
 	}
@@ -94,7 +99,7 @@ func New(control *sql.DB, opts Options) *Executor {
 		opts.Retry = session.DefaultRetry()
 	}
 
-	return &Executor{control: control, opts: opts}
+	return &Executor{control: control, work: work, opts: opts}
 }
 
 // Run applies every pending step of every migration, in order.

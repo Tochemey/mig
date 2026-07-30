@@ -27,6 +27,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/tochemey/mig/internal/parse"
@@ -40,9 +41,22 @@ const prefix = "-- +mig "
 const (
 	annStep          = "step:"
 	annNoTx          = "notx"
+	annBackfill      = "backfill:"
 	annSatisfied     = "satisfied:"
 	annNoLockTimeout = "no_lock_timeout"
 )
+
+// The placeholders a backfill's SQL uses for the range its batch covers. They
+// are rewritten to bind parameters before the statement is parsed, since the
+// Postgres grammar does not accept them.
+const (
+	cursorLow  = ":cursor_lo"
+	cursorHigh = ":cursor_hi"
+)
+
+// DefaultBatch is the batch size a backfill starts at when the annotation does
+// not give one.
+const DefaultBatch = 1000
 
 // sqlPredicatePrefix wraps an author-supplied predicate expression.
 const sqlPredicatePrefix = "sql("
@@ -54,6 +68,9 @@ var ErrUnknownAnnotation = errors.New("unknown annotation")
 
 // ErrEmptyStep reports a step with a name and no statements.
 var ErrEmptyStep = errors.New("step has no statements")
+
+// ErrBadBackfill reports a backfill annotation that cannot be understood.
+var ErrBadBackfill = errors.New("malformed backfill annotation")
 
 // scan splits a migration's contents into steps.
 //
@@ -178,6 +195,10 @@ func apply(s *Step, annotation string) error {
 		return applySatisfied(s, strings.TrimSpace(expr))
 	}
 
+	if spec, ok := strings.CutPrefix(annotation, annBackfill); ok {
+		return applyBackfill(s, strings.TrimSpace(spec))
+	}
+
 	return fmt.Errorf("%w %q", ErrUnknownAnnotation, annotation)
 }
 
@@ -197,8 +218,70 @@ func applySatisfied(s *Step, expr string) error {
 	return nil
 }
 
+// applyBackfill reads the key-value settings of a backfill annotation.
+func applyBackfill(s *Step, spec string) error {
+	s.Kind = step.KindBackfill
+	s.Backfill.Batch = DefaultBatch
+
+	for _, field := range strings.Fields(spec) {
+		name, value, ok := strings.Cut(field, "=")
+		if !ok {
+			return fmt.Errorf("%w: backfill setting %q is not name=value", ErrBadBackfill, field)
+		}
+
+		if err := applyBackfillField(s, name, value); err != nil {
+			return err
+		}
+	}
+
+	if s.Backfill.Table == "" || s.Backfill.Key == "" {
+		return fmt.Errorf("%w: backfill needs table= and key=", ErrBadBackfill)
+	}
+
+	return nil
+}
+
+// applyBackfillField records one setting of a backfill annotation.
+func applyBackfillField(s *Step, name, value string) error {
+	switch name {
+	case "table":
+		s.Backfill.Table = value
+
+	case "key":
+		s.Backfill.Key = value
+
+	case "batch":
+		batch, err := strconv.Atoi(value)
+		if err != nil || batch <= 0 {
+			return fmt.Errorf("%w: batch %q is not a positive number", ErrBadBackfill, value)
+		}
+
+		s.Backfill.Batch = batch
+
+	case "max_lag_bytes":
+		lag, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || lag < 0 {
+			return fmt.Errorf("%w: max_lag_bytes %q is not a number", ErrBadBackfill, value)
+		}
+
+		s.Backfill.MaxLagBytes = lag
+
+	default:
+		return fmt.Errorf("%w: unknown backfill setting %q", ErrBadBackfill, name)
+	}
+
+	return nil
+}
+
 // finish parses a step's accumulated SQL and completes its fields.
 func finish(s *Step, body string) error {
+	if s.Kind == step.KindBackfill {
+		// The cursor placeholders are not Postgres syntax, so they become bind
+		// parameters before anything tries to parse the statement.
+		body = strings.ReplaceAll(body, cursorLow, "$1")
+		body = strings.ReplaceAll(body, cursorHigh, "$2")
+	}
+
 	statements, err := parse.Parse(body)
 	if err != nil {
 		return fmt.Errorf("step %q: %w", s.Name, err)
@@ -206,6 +289,13 @@ func finish(s *Step, body string) error {
 
 	if len(statements) == 0 {
 		return fmt.Errorf("step %q: %w", s.Name, ErrEmptyStep)
+	}
+
+	// A backfill's cursor covers one statement, so more than one would leave
+	// the extras outside the range the checkpoint describes.
+	if s.Kind == step.KindBackfill && len(statements) != 1 {
+		return fmt.Errorf("step %q: %w: a backfill takes one statement, got %d",
+			s.Name, ErrBadBackfill, len(statements))
 	}
 
 	checksum, err := parse.Checksum(body)

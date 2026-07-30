@@ -27,6 +27,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tochemey/mig/internal/plan"
@@ -263,16 +264,141 @@ func TestBuildAcceptsATransactionalStep(t *testing.T) {
 // TestBuildRejectsUnsupportedKinds records what this build cannot run yet, so
 // an unimplemented kind fails loudly rather than being silently skipped.
 func TestBuildRejectsUnsupportedKinds(t *testing.T) {
-	unsupported := plan.Step{Name: "backfill_email", Kind: step.KindBackfill}
-
-	if _, err := unsupported.Build(); !errors.Is(err, plan.ErrKindUnsupported) {
-		t.Fatalf("build returned %v, want ErrKindUnsupported", err)
-	}
-
 	unknown := plan.Step{Name: "mystery", Kind: "teleport"}
 
 	if _, err := unknown.Build(); !errors.Is(err, plan.ErrKindUnsupported) {
 		t.Fatalf("build returned %v, want ErrKindUnsupported", err)
+	}
+}
+
+// TestLoadReadsBackfillAnnotation covers the settings a backfill carries and
+// the cursor placeholders, which are not Postgres syntax and so are rewritten
+// before anything parses them.
+func TestLoadReadsBackfillAnnotation(t *testing.T) {
+	dir := write(t, map[string]string{
+		"20240817120000_fill.sql": `
+-- +mig step: fill_email
+-- +mig backfill: table=users key=id batch=250 max_lag_bytes=1048576
+-- +mig satisfied: sql(SELECT NOT EXISTS (SELECT 1 FROM users WHERE email IS NULL))
+UPDATE users SET email = legacy_email
+ WHERE id > :cursor_lo AND id <= :cursor_hi AND email IS NULL;
+`,
+	})
+
+	loaded, err := plan.Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	got := loaded.Migrations[0].Steps[0]
+
+	if got.Kind != step.KindBackfill {
+		t.Fatalf("kind is %q, want %q", got.Kind, step.KindBackfill)
+	}
+
+	want := step.BackfillConfig{Table: "users", Key: "id", Batch: 250, MaxLagBytes: 1048576}
+	if got.Backfill != want {
+		t.Fatalf("backfill is %+v, want %+v", got.Backfill, want)
+	}
+
+	if !strings.Contains(got.SQL, "$1") || !strings.Contains(got.SQL, "$2") {
+		t.Fatalf("cursor placeholders were not rewritten: %s", got.SQL)
+	}
+
+	if _, err := got.Build(); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+}
+
+// TestBackfillDefaultsItsBatch covers an annotation that names only what it
+// must.
+func TestBackfillDefaultsItsBatch(t *testing.T) {
+	dir := write(t, map[string]string{
+		"20240817120000_fill.sql": `
+-- +mig step: fill
+-- +mig backfill: table=users key=id
+-- +mig satisfied: sql(SELECT true)
+UPDATE users SET email = legacy_email WHERE id > :cursor_lo AND id <= :cursor_hi;
+`,
+	})
+
+	loaded, err := plan.Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	if got := loaded.Migrations[0].Steps[0].Backfill.Batch; got != plan.DefaultBatch {
+		t.Fatalf("batch defaulted to %d, want %d", got, plan.DefaultBatch)
+	}
+}
+
+// TestBackfillRequiresAPredicate is the refusal that keeps the ledger from
+// deciding whether a backfill is done. The cursor lives there, and a cursor
+// cannot say whether rows were added behind it.
+func TestBackfillRequiresAPredicate(t *testing.T) {
+	dir := write(t, map[string]string{
+		"20240817120000_fill.sql": `
+-- +mig step: fill
+-- +mig backfill: table=users key=id
+UPDATE users SET email = legacy_email WHERE id > :cursor_lo AND id <= :cursor_hi;
+`,
+	})
+
+	loaded, err := plan.Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	_, err = loaded.Migrations[0].Steps[0].Build()
+	if !errors.Is(err, step.ErrNoBackfillPredicate) {
+		t.Fatalf("build returned %v, want ErrNoBackfillPredicate", err)
+	}
+}
+
+// TestLoadRejectsBadBackfillAnnotations covers every way the annotation can be
+// wrong. Each would otherwise become a backfill that walks the wrong range.
+func TestLoadRejectsBadBackfillAnnotations(t *testing.T) {
+	cases := map[string]string{
+		"no table":           "-- +mig backfill: key=id",
+		"no key":             "-- +mig backfill: table=users",
+		"not a pair":         "-- +mig backfill: table=users key=id batch",
+		"unknown setting":    "-- +mig backfill: table=users key=id stride=10",
+		"batch not a number": "-- +mig backfill: table=users key=id batch=lots",
+		"batch not positive": "-- +mig backfill: table=users key=id batch=0",
+		"lag not a number":   "-- +mig backfill: table=users key=id max_lag_bytes=huge",
+	}
+
+	for name, annotation := range cases {
+		t.Run(name, func(t *testing.T) {
+			const statement = "\nUPDATE users SET email = legacy_email" +
+				" WHERE id > :cursor_lo AND id <= :cursor_hi;\n"
+
+			dir := write(t, map[string]string{
+				"20240817120000_fill.sql": annotation + statement,
+			})
+
+			if _, err := plan.Load(dir); !errors.Is(err, plan.ErrBadBackfill) {
+				t.Fatalf("load returned %v, want ErrBadBackfill", err)
+			}
+		})
+	}
+}
+
+// TestBackfillTakesOneStatement covers a cursor that would not describe
+// everything the step did.
+func TestBackfillTakesOneStatement(t *testing.T) {
+	dir := write(t, map[string]string{
+		"20240817120000_fill.sql": `
+-- +mig step: fill
+-- +mig backfill: table=users key=id
+-- +mig satisfied: sql(SELECT true)
+UPDATE users SET email = legacy_email WHERE id > :cursor_lo AND id <= :cursor_hi;
+UPDATE users SET name = 'x' WHERE id > :cursor_lo AND id <= :cursor_hi;
+`,
+	})
+
+	if _, err := plan.Load(dir); !errors.Is(err, plan.ErrBadBackfill) {
+		t.Fatalf("load returned %v, want ErrBadBackfill", err)
 	}
 }
 

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Backfill steps. A *backfill:* annotation naming *table*, *key* and optionally *batch* and *max_lag_bytes* turns a statement into a resumable one, with *:cursor_lo* and *:cursor_hi* marking the key range each batch covers. Pagination is by key range only: *OFFSET* rescans everything it skips, so its cost grows with the square of the table, and it silently misses rows when concurrent writes shift what it is counting past. **Each batch commits with the cursor that covers it, in one transaction.** An index build cannot be made atomic with its ledger row and so has to be reconciled; a batch and its cursor can be, so "the rows landed but the cursor did not" is structurally impossible rather than merely unlikely. A backfill requires a *satisfied:* predicate, since the cursor lives in the ledger and the ledger may not decide whether work remains.
+
+- *internal/throttle*: closed-loop pacing. Batch size halves when replication lag passes *max_lag_bytes* or a batch runs longer than the target, and grows back by a quarter when neither does, clamped between 100 and 50,000 rows. Lag comes from *pg_stat_replication*; a primary with no replicas reports none rather than failing. Batches run on their own connection pool so a backfill cannot starve the heartbeat that keeps its lease alive.
+
 - Transactional DDL steps. A step without a *notx* annotation runs inside a transaction the executor opens, and its ledger row is written in that same transaction — the fence is asserted first, the DDL runs, the row is written, and one commit covers all three. A run killed part-way through leaves the ledger exactly as it was, so unlike a concurrent index build there is nothing to reconcile and no repair or postcondition check to perform. It is also the one place the ledger is allowed to decide whether work remains: a row saying *succeeded* committed with the DDL it describes, which is what lets a statement carrying no inferable predicate be skipped on the next run rather than reapplied.
 
 - *mig* is now a [cobra](https://github.com/spf13/cobra) command tree, with *--help* per command, *--version*, and shell completion. Exit codes are unchanged and still distinguish a failed run from another runner holding the lease.
@@ -44,5 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *Makefile*: *make cover* merges two coverage sources. Parent test binaries report through *-coverprofile*; binaries spawned as children are built with *-cover* and report into *MIG_COVERDIR*. Counting only the first would report the migrator — which only ever executes in a child process — as untested.
 
 ### Changed
+
+- Lease ownership and expiry are now separate rows, *mig.lease* and *mig.lease_expiry*. Every ledger write locks the ownership row for the length of its transaction, and a backfill's transaction lasts as long as its batch; with both in one row the heartbeat queued behind the batch and the holder gave up a lease it still owned. Measured before the change: a guard held for five seconds blocked renewal for 5.022 seconds. Renewal now reads ownership and writes expiry, so a long batch blocks a takeover — which is correct — without blocking renewal.
 
 - *.golangci.yml*: dropped *modules-download-mode: vendor*, which conflicted with *vendor* being ignored in *.gitignore*.

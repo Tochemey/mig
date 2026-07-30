@@ -73,6 +73,9 @@ type Step struct {
 	// Satisfied is the author's predicate expression, empty when inferred.
 	Satisfied string
 
+	// Backfill carries the backfill annotation's settings, for that kind only.
+	Backfill step.BackfillConfig
+
 	// NoLockTimeout suppresses the default lock_timeout for this step.
 	NoLockTimeout bool
 }
@@ -91,7 +94,12 @@ func (s Step) Build() (step.Step, error) {
 		return step.NewDDLNoTx(meta, s.Statements, check)
 
 	case step.KindBackfill:
-		return nil, fmt.Errorf("step %q: %w", s.Name, ErrKindUnsupported)
+		if len(s.Statements) != 1 {
+			return nil, fmt.Errorf("step %q: %w: a backfill takes one statement, got %d",
+				s.Name, ErrBadBackfill, len(s.Statements))
+		}
+
+		return step.NewBackfill(meta, s.Statements[0].SQL, s.Backfill, check)
 
 	default:
 		return nil, fmt.Errorf("step %q: %w", s.Name, ErrKindUnsupported)

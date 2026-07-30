@@ -74,16 +74,29 @@ var schemaStatements = []string{
 		PRIMARY KEY (migration_id, idx)
 	)`,
 
+	// Ownership and expiry are separate rows on purpose.
+	//
+	// Every ledger write locks the ownership row for the length of its
+	// transaction, and a backfill's transaction lasts as long as its batch. If
+	// the heartbeat also wrote that row it would queue behind the batch and the
+	// holder would give up a lease it still owns — under exactly the load the
+	// lease exists to survive. Keeping them apart lets a long batch block a
+	// takeover, which is correct, without blocking renewal.
 	`CREATE TABLE IF NOT EXISTS mig.lease (
+		id    int PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+		owner text,
+		fence bigint NOT NULL DEFAULT 0
+	)`,
+
+	`CREATE TABLE IF NOT EXISTS mig.lease_expiry (
 		id           int PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-		owner        text,
-		fence        bigint NOT NULL DEFAULT 0,
 		expires_at   timestamptz,
 		heartbeat_at timestamptz
 	)`,
 
-	// The singleton lease row must exist before anyone can contend for it.
+	// The singleton rows must exist before anyone can contend for them.
 	`INSERT INTO mig.lease (id) VALUES (1) ON CONFLICT (id) DO NOTHING`,
+	`INSERT INTO mig.lease_expiry (id) VALUES (1) ON CONFLICT (id) DO NOTHING`,
 }
 
 // EnsureSchema creates the ledger schema if it is absent. It is idempotent and
