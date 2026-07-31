@@ -123,6 +123,40 @@ func TestRunLeavesRewrittenStatementsUnlocated(t *testing.T) {
 	}
 }
 
+// TestRunStripsFixesOnSharedSteps pins the application boundary: a fix
+// replaces its whole step, so a statement sharing a step keeps the finding
+// and loses the fix.
+func TestRunStripsFixesOnSharedSteps(t *testing.T) {
+	shared := "-- +mig step: both\n" +
+		"ALTER TABLE t ALTER COLUMN c SET NOT NULL;\n" +
+		"SELECT 1;\n"
+
+	alone := "-- +mig step: one\n" +
+		"ALTER TABLE t ALTER COLUMN c SET NOT NULL;\n"
+
+	fsys := fstest.MapFS{
+		"1_shared.sql": &fstest.MapFile{Data: []byte(shared)},
+		"2_alone.sql":  &fstest.MapFile{Data: []byte(alone)},
+	}
+
+	findings, _, err := lint.Run(fsys, load(t, fsys), current)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(findings) != 2 {
+		t.Fatalf("found %d findings, want 2: %+v", len(findings), findings)
+	}
+
+	if findings[0].Fix != "" {
+		t.Error("a statement sharing its step kept a fix")
+	}
+
+	if findings[1].Fix == "" {
+		t.Error("a statement alone in its step lost its fix")
+	}
+}
+
 // TestRunRejectsHandBuiltPlans covers the failures only a plan that did not
 // come from the loader can produce.
 func TestRunRejectsHandBuiltPlans(t *testing.T) {

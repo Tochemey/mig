@@ -11,7 +11,8 @@
         "start": 22,
         "end": 114,
         "line": 2
-      }
+      },
+      "fix": "-- +mig step: add_orders_user_fk_not_valid\n-- NOT VALID: the key holds for new writes at once, no scan yet\nALTER TABLE orders ADD CONSTRAINT orders_user_fk FOREIGN KEY (user_id) REFERENCES users (id) NOT VALID;\n\n-- +mig step: validate_orders_user_fk\n-- +mig notx\n-- the scan happens here, without blocking writes to either table\nALTER TABLE orders VALIDATE CONSTRAINT orders_user_fk;\n"
     }
   ]
 }

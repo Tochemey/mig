@@ -27,6 +27,8 @@ import (
 	"fmt"
 
 	pgquery "github.com/pganalyze/pg_query_go/v6"
+
+	"github.com/tochemey/mig/internal/lint/fix"
 )
 
 // l004 flags ALTER COLUMN TYPE. Offline the model cannot rule out the
@@ -42,15 +44,15 @@ func (l004) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 		return nil
 	}
 
-	changes := false
+	var change *pgquery.AlterTableCmd
 
 	for _, cmd := range cmds {
 		if cmd.GetSubtype() == pgquery.AlterTableType_AT_AlterColumnType {
-			changes = true
+			change = cmd
 		}
 	}
 
-	if !changes {
+	if change == nil {
 		return nil
 	}
 
@@ -59,8 +61,16 @@ func (l004) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 		return nil
 	}
 
-	return finding(SeverityWarn, fmt.Sprintf(
+	found := finding(SeverityWarn, fmt.Sprintf(
 		"changing a column type rewrites %s under ACCESS EXCLUSIVE; "+
 			"add a new column, backfill, swap reads, then drop the old one",
 		qualified(schema, name)), ctx)
+
+	// The replacement is a scaffold: the write gap between backfill and swap
+	// is not a pure SQL problem, so the plan arrives commented out.
+	if len(cmds) == 1 {
+		found = withFix(found, fix.TypeChangeScaffold(alter.GetRelation(), change))
+	}
+
+	return found
 }

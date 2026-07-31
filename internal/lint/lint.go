@@ -114,6 +114,13 @@ func lintMigration(migration *plan.Migration, content string, version int) ([]ru
 					found.Step = s.Name
 					found.Span = span
 
+					// A fix replaces its whole step. A statement sharing a
+					// step keeps the finding and loses the fix; splitting
+					// the step is the author's call.
+					if len(s.Statements) != 1 {
+						found.Fix = ""
+					}
+
 					findings = append(findings, found)
 				}
 			}

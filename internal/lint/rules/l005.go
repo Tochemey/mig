@@ -28,6 +28,7 @@ import (
 
 	pgquery "github.com/pganalyze/pg_query_go/v6"
 
+	"github.com/tochemey/mig/internal/lint/fix"
 	"github.com/tochemey/mig/internal/parse"
 )
 
@@ -63,10 +64,18 @@ func (l005) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 			continue
 		}
 
-		findings = append(findings, finding(SeverityWarn, fmt.Sprintf(
+		found := finding(SeverityWarn, fmt.Sprintf(
 			"SET NOT NULL scans %s under ACCESS EXCLUSIVE to verify %q; "+
 				"add CHECK (%s IS NOT NULL) NOT VALID, validate it, then set NOT NULL",
-			qualified(schema, name), column, column), ctx)...)
+			qualified(schema, name), column, column), ctx)
+
+		// Before 12 the server rescans at SET NOT NULL regardless, so the
+		// pattern would add steps without removing the scan.
+		if ctx.TargetVersion >= 12 && len(cmds) == 1 {
+			found = withFix(found, fix.NotNullPattern(alter.GetRelation(), column))
+		}
+
+		findings = append(findings, found...)
 	}
 
 	return findings

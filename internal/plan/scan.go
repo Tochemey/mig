@@ -34,15 +34,26 @@ import (
 	"github.com/tochemey/mig/internal/step"
 )
 
-// prefix marks a line as an annotation rather than SQL or a comment.
-const prefix = "-- +mig "
+// AnnotationPrefix marks a line as an annotation rather than SQL or a
+// comment. It is exported with the annotation names below so that code
+// generating or recognising the format, such as the linter's fix engine,
+// shares one spelling with the loader.
+const AnnotationPrefix = "-- +mig "
 
 // The annotations.
 const (
-	annStep          = "step:"
-	annNoTx          = "notx"
-	annBackfill      = "backfill:"
-	annSatisfied     = "satisfied:"
+	// AnnotationStep opens a step.
+	AnnotationStep = "step:"
+
+	// AnnotationNoTx marks a step that runs outside a transaction.
+	AnnotationNoTx = "notx"
+
+	// AnnotationBackfill marks a batched backfill step.
+	AnnotationBackfill = "backfill:"
+
+	// AnnotationSatisfied carries an author-supplied predicate.
+	AnnotationSatisfied = "satisfied:"
+
 	annNoLockTimeout = "no_lock_timeout"
 )
 
@@ -137,7 +148,7 @@ func scan(content string) ([]Step, error) {
 			continue
 		}
 
-		if name, isStep := strings.CutPrefix(annotation, annStep); isStep {
+		if name, isStep := strings.CutPrefix(annotation, AnnotationStep); isStep {
 			if err := begin(strings.TrimSpace(name)); err != nil {
 				return nil, err
 			}
@@ -171,7 +182,7 @@ func scan(content string) ([]Step, error) {
 func annotationOf(line string) (string, bool) {
 	trimmed := strings.TrimSpace(line)
 
-	body, ok := strings.CutPrefix(trimmed, strings.TrimSpace(prefix))
+	body, ok := strings.CutPrefix(trimmed, strings.TrimSpace(AnnotationPrefix))
 	if !ok {
 		return "", false
 	}
@@ -182,7 +193,7 @@ func annotationOf(line string) (string, bool) {
 // apply records one annotation against the step being accumulated.
 func apply(s *Step, annotation string) error {
 	switch annotation {
-	case annNoTx:
+	case AnnotationNoTx:
 		s.Kind = step.KindDDLNoTx
 		return nil
 
@@ -191,11 +202,11 @@ func apply(s *Step, annotation string) error {
 		return nil
 	}
 
-	if expr, ok := strings.CutPrefix(annotation, annSatisfied); ok {
+	if expr, ok := strings.CutPrefix(annotation, AnnotationSatisfied); ok {
 		return applySatisfied(s, strings.TrimSpace(expr))
 	}
 
-	if spec, ok := strings.CutPrefix(annotation, annBackfill); ok {
+	if spec, ok := strings.CutPrefix(annotation, AnnotationBackfill); ok {
 		return applyBackfill(s, strings.TrimSpace(spec))
 	}
 

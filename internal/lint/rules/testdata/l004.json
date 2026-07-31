@@ -11,7 +11,9 @@
         "start": 22,
         "end": 67,
         "line": 2
-      }
+      },
+      "fix": "-- TODO: writes landing between the backfill and the swap are lost unless the application dual-writes both columns or traffic pauses; decide that, then run these steps\n-- The steps below are a plan, not a migration; uncomment them once the\n-- TODO above is resolved.\n--\n-- -- +mig step: add_users_id__new\n-- -- the new column arrives empty beside the old one\n-- ALTER TABLE users ADD COLUMN id__new bigint;\n\n-- -- +mig step: backfill_users_id__new\n-- -- +mig backfill: table=users key=id batch=5000\n-- -- +mig satisfied: sql(SELECT NOT EXISTS (SELECT 1 FROM users WHERE id__new IS NULL))\n-- -- rows where id is NULL stay NULL; adjust the predicate if the column is nullable. key=id is assumed\n-- UPDATE users SET id__new = id::bigint WHERE id \u003e :cursor_lo AND id \u003c= :cursor_hi AND id__new IS NULL;\n\n-- -- +mig step: swap_users_id\n-- -- one transaction: the old column leaves, the new one takes its name\n-- ALTER TABLE users DROP id;\n-- ALTER TABLE users RENAME COLUMN id__new TO id;\n",
+      "fix_scaffold": true
     },
     {
       "rule": "L004",
@@ -24,7 +26,9 @@
         "start": 344,
         "end": 394,
         "line": 14
-      }
+      },
+      "fix": "-- TODO: writes landing between the backfill and the swap are lost unless the application dual-writes both columns or traffic pauses; decide that, then run these steps\n-- The steps below are a plan, not a migration; uncomment them once the\n-- TODO above is resolved.\n--\n-- -- +mig step: add_audit2_id__new\n-- -- the new column arrives empty beside the old one\n-- ALTER TABLE ops.audit2 ADD COLUMN id__new bigint;\n\n-- -- +mig step: backfill_audit2_id__new\n-- -- +mig backfill: table=ops.audit2 key=id batch=5000\n-- -- +mig satisfied: sql(SELECT NOT EXISTS (SELECT 1 FROM ops.audit2 WHERE id__new IS NULL))\n-- -- rows where id is NULL stay NULL; adjust the predicate if the column is nullable. key=id is assumed\n-- UPDATE ops.audit2 SET id__new = id::bigint WHERE id \u003e :cursor_lo AND id \u003c= :cursor_hi AND id__new IS NULL;\n\n-- -- +mig step: swap_audit2_id\n-- -- one transaction: the old column leaves, the new one takes its name\n-- ALTER TABLE ops.audit2 DROP id;\n-- ALTER TABLE ops.audit2 RENAME COLUMN id__new TO id;\n",
+      "fix_scaffold": true
     },
     {
       "rule": "L004",
@@ -37,7 +41,9 @@
         "start": 448,
         "end": 492,
         "line": 17
-      }
+      },
+      "fix": "-- TODO: writes landing between the backfill and the swap are lost unless the application dual-writes both columns or traffic pauses; decide that, then run these steps\n-- The steps below are a plan, not a migration; uncomment them once the\n-- TODO above is resolved.\n--\n-- -- +mig step: add_cache_v__new\n-- -- the new column arrives empty beside the old one\n-- ALTER TABLE cache ADD COLUMN v__new bigint;\n\n-- -- +mig step: backfill_cache_v__new\n-- -- +mig backfill: table=cache key=id batch=5000\n-- -- +mig satisfied: sql(SELECT NOT EXISTS (SELECT 1 FROM cache WHERE v__new IS NULL))\n-- -- rows where v is NULL stay NULL; adjust the predicate if the column is nullable. key=id is assumed\n-- UPDATE cache SET v__new = v::bigint WHERE id \u003e :cursor_lo AND id \u003c= :cursor_hi AND v__new IS NULL;\n\n-- -- +mig step: swap_cache_v\n-- -- one transaction: the old column leaves, the new one takes its name\n-- ALTER TABLE cache DROP v;\n-- ALTER TABLE cache RENAME COLUMN v__new TO v;\n",
+      "fix_scaffold": true
     }
   ]
 }

@@ -9,9 +9,10 @@
       "step": "volatile_default",
       "span": {
         "start": 31,
-        "end": 96,
+        "end": 105,
         "line": 2
-      }
+      },
+      "fix": "-- +mig step: add_users_token_nullable\n-- the column arrives nullable and empty: catalog only, no rewrite\nALTER TABLE users ADD COLUMN token uuid;\n\n-- +mig step: set_users_token_default\n-- future rows get the default; existing rows are left to the backfill\nALTER TABLE users ALTER COLUMN token SET DEFAULT gen_random_uuid();\n\n-- +mig step: backfill_users_token\n-- +mig backfill: table=users key=id batch=5000\n-- +mig satisfied: sql(SELECT NOT EXISTS (SELECT 1 FROM users WHERE token IS NULL))\n-- batched so each transaction stays short; key=id is assumed, point it at the primary key if that is not right\nUPDATE users SET token = gen_random_uuid() WHERE id \u003e :cursor_lo AND id \u003c= :cursor_hi AND token IS NULL;\n\n-- +mig step: users_token_not_null_check\n-- +mig satisfied: sql(SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('users') AND conname = 'users_token_nn') OR coalesce((SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass('users') AND attname = 'token'), false))\n-- NOT VALID: the check exists without scanning anything\nALTER TABLE users ADD CONSTRAINT users_token_nn CHECK (token IS NOT NULL) NOT VALID;\n\n-- +mig step: validate_users_token_not_null\n-- +mig notx\n-- +mig satisfied: sql(SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('users') AND conname = 'users_token_nn' AND convalidated) OR coalesce((SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass('users') AND attname = 'token'), false))\n-- the scan happens here, without blocking reads or writes\nALTER TABLE users VALIDATE CONSTRAINT users_token_nn;\n\n-- +mig step: set_users_token_not_null\n-- +mig satisfied: sql(SELECT coalesce((SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass('users') AND attname = 'token'), false))\n-- catalog only from Postgres 12: the validated check is the proof\nALTER TABLE users ALTER COLUMN token SET NOT NULL;\n\n-- +mig step: drop_users_token_check\n-- +mig satisfied: sql(SELECT NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('users') AND conname = 'users_token_nn'))\n-- the column carries NOT NULL itself now; the scaffolding leaves\nALTER TABLE users DROP CONSTRAINT users_token_nn;\n"
     },
     {
       "rule": "L004",
@@ -21,9 +22,35 @@
       "file": "1_l003.sql",
       "step": "sibling_rewrite_is_not_the_columns_fault",
       "span": {
-        "start": 483,
-        "end": 553,
+        "start": 492,
+        "end": 562,
         "line": 17
+      }
+    },
+    {
+      "rule": "L003",
+      "severity": "warn",
+      "message": "ADD COLUMN rewrites users under ACCESS EXCLUSIVE (table rewrite: serial column backfills from a sequence); add the column nullable, backfill in batches, then constrain it",
+      "detail": "ACCESS EXCLUSIVE on users, held for a table rewrite; blocks reads and writes",
+      "file": "1_l003.sql",
+      "step": "serial_has_no_simple_fix",
+      "span": {
+        "start": 604,
+        "end": 646,
+        "line": 20
+      }
+    },
+    {
+      "rule": "L003",
+      "severity": "warn",
+      "message": "ADD COLUMN rewrites users under ACCESS EXCLUSIVE (table rewrite: identity column backfills from a sequence); add the column nullable, backfill in batches, then constrain it",
+      "detail": "ACCESS EXCLUSIVE on users, held for a table rewrite; blocks reads and writes",
+      "file": "1_l003.sql",
+      "step": "identity_has_no_simple_fix",
+      "span": {
+        "start": 690,
+        "end": 756,
+        "line": 23
       }
     }
   ]

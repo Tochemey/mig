@@ -27,6 +27,8 @@ import (
 	"fmt"
 
 	pgquery "github.com/pganalyze/pg_query_go/v6"
+
+	"github.com/tochemey/mig/internal/lint/fix"
 )
 
 // l006 flags ADD FOREIGN KEY without NOT VALID, which validates every
@@ -60,11 +62,19 @@ func (l006) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 
 		parent := constraint.GetPktable()
 
-		findings = append(findings, finding(SeverityWarn, fmt.Sprintf(
+		found := finding(SeverityWarn, fmt.Sprintf(
 			"ADD FOREIGN KEY validates every row of %s while blocking writes to both it and %s; "+
 				"add the key NOT VALID, then VALIDATE CONSTRAINT in its own step",
 			qualified(schema, name),
-			qualified(parent.GetSchemaname(), parent.GetRelname())), ctx)...)
+			qualified(parent.GetSchemaname(), parent.GetRelname())), ctx)
+
+		// An anonymous key gets its name from the server, so the validation
+		// step would have nothing to name; that fix stays unwritten.
+		if constraint.GetConname() != "" && len(cmds) == 1 {
+			found = withFix(found, fix.ForeignKeyTwoStep(alter.GetRelation(), constraint))
+		}
+
+		findings = append(findings, found...)
 	}
 
 	return findings

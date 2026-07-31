@@ -36,3 +36,6 @@ ALTER TABLE payments ADD CONSTRAINT payments_const_nn CHECK ((1) IS NOT NULL) NO
 
 -- +mig step: combined
 ALTER TABLE users ADD COLUMN flag boolean, ALTER COLUMN flag2 SET NOT NULL;
+
+-- +mig step: unrelated_constraint_kind
+ALTER TABLE payments ADD CONSTRAINT payments_uq UNIQUE (ref);

@@ -11,7 +11,8 @@
         "start": 22,
         "end": 80,
         "line": 2
-      }
+      },
+      "fix": "-- +mig step: index_users_pk\n-- +mig notx\n-- the expensive build runs concurrently, blocking nothing\nCREATE UNIQUE INDEX CONCURRENTLY users_pk ON users USING btree (id);\n\n-- +mig step: adopt_users_pk\n-- adoption is catalog work, but verifying NOT NULL still scans; on a large table set each key column NOT NULL via a validated check first\nALTER TABLE users ADD CONSTRAINT users_pk PRIMARY KEY USING INDEX users_pk;\n"
     },
     {
       "rule": "L008",

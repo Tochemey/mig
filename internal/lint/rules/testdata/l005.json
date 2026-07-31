@@ -11,7 +11,8 @@
         "start": 26,
         "end": 75,
         "line": 2
-      }
+      },
+      "fix": "-- +mig step: users_email_not_null_check\n-- +mig satisfied: sql(SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('users') AND conname = 'users_email_nn') OR coalesce((SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass('users') AND attname = 'email'), false))\n-- NOT VALID: the check exists without scanning anything\nALTER TABLE users ADD CONSTRAINT users_email_nn CHECK (email IS NOT NULL) NOT VALID;\n\n-- +mig step: validate_users_email_not_null\n-- +mig notx\n-- +mig satisfied: sql(SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('users') AND conname = 'users_email_nn' AND convalidated) OR coalesce((SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass('users') AND attname = 'email'), false))\n-- the scan happens here, without blocking reads or writes\nALTER TABLE users VALIDATE CONSTRAINT users_email_nn;\n\n-- +mig step: set_users_email_not_null\n-- +mig satisfied: sql(SELECT coalesce((SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass('users') AND attname = 'email'), false))\n-- catalog only from Postgres 12: the validated check is the proof\nALTER TABLE users ALTER COLUMN email SET NOT NULL;\n\n-- +mig step: drop_users_email_check\n-- +mig satisfied: sql(SELECT NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('users') AND conname = 'users_email_nn'))\n-- the column carries NOT NULL itself now; the scaffolding leaves\nALTER TABLE users DROP CONSTRAINT users_email_nn;\n"
     },
     {
       "rule": "L005",
@@ -24,7 +25,8 @@
         "start": 610,
         "end": 660,
         "line": 20
-      }
+      },
+      "fix": "-- +mig step: payments_ref_not_null_check\n-- +mig satisfied: sql(SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('payments') AND conname = 'payments_ref_nn') OR coalesce((SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass('payments') AND attname = 'ref'), false))\n-- NOT VALID: the check exists without scanning anything\nALTER TABLE payments ADD CONSTRAINT payments_ref_nn CHECK (ref IS NOT NULL) NOT VALID;\n\n-- +mig step: validate_payments_ref_not_null\n-- +mig notx\n-- +mig satisfied: sql(SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('payments') AND conname = 'payments_ref_nn' AND convalidated) OR coalesce((SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass('payments') AND attname = 'ref'), false))\n-- the scan happens here, without blocking reads or writes\nALTER TABLE payments VALIDATE CONSTRAINT payments_ref_nn;\n\n-- +mig step: set_payments_ref_not_null\n-- +mig satisfied: sql(SELECT coalesce((SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass('payments') AND attname = 'ref'), false))\n-- catalog only from Postgres 12: the validated check is the proof\nALTER TABLE payments ALTER COLUMN ref SET NOT NULL;\n\n-- +mig step: drop_payments_ref_check\n-- +mig satisfied: sql(SELECT NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('payments') AND conname = 'payments_ref_nn'))\n-- the column carries NOT NULL itself now; the scaffolding leaves\nALTER TABLE payments DROP CONSTRAINT payments_ref_nn;\n"
     },
     {
       "rule": "L005",

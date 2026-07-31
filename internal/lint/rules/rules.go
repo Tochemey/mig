@@ -39,6 +39,7 @@ import (
 
 	pgquery "github.com/pganalyze/pg_query_go/v6"
 
+	"github.com/tochemey/mig/internal/lint/fix"
 	"github.com/tochemey/mig/internal/lint/lockmodel"
 	"github.com/tochemey/mig/internal/parse"
 	"github.com/tochemey/mig/internal/plan"
@@ -109,6 +110,13 @@ type Finding struct {
 	File string `json:"file"`
 	Step string `json:"step"`
 	Span Span   `json:"span"`
+
+	// Fix is the replacement in mig-format annotated SQL, empty when no safe
+	// rewrite exists. FixScaffold marks a plan rather than a migration: the
+	// text is fully commented out, is inserted above the statement instead
+	// of replacing it, and must be completed by hand.
+	Fix         string `json:"fix,omitempty"`
+	FixScaffold bool   `json:"fix_scaffold,omitempty"`
 }
 
 // Context is what a rule sees beyond the statement itself.
@@ -223,6 +231,23 @@ func finding(severity Severity, message string, ctx Context) []Finding {
 		Message:  message,
 		Detail:   describe(ctx.Analysis),
 	}}
+}
+
+// withFix renders the replacement onto findings. A fix that fails to render
+// keeps the finding and drops the fix: the hazard stands either way, and a
+// rendering failure is a programming error the fix package's tests catch.
+func withFix(findings []Finding, f *fix.Fix) []Finding {
+	text, err := f.Render()
+	if err != nil {
+		return findings
+	}
+
+	for i := range findings {
+		findings[i].Fix = text
+		findings[i].FixScaffold = f.Scaffold
+	}
+
+	return findings
 }
 
 // alterCommands unwraps an ALTER TABLE statement into its actions, which is

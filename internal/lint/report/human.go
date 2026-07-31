@@ -53,21 +53,25 @@ func Human(w io.Writer, findings []rules.Finding, sources map[string]string) err
 			warnings++
 		}
 
-		fmt.Fprintf(out, "%s:%d: %s %s: %s\n", f.File, f.Span.Line, f.Severity, f.RuleID, f.Message)
+		_, _ = fmt.Fprintf(out, "%s:%d: %s %s: %s\n", f.File, f.Span.Line, f.Severity, f.RuleID, f.Message)
 
 		if source, ok := sources[f.File]; ok && f.Span.Line > 0 {
 			line, column := lineAt(source, f.Span.Start)
-			fmt.Fprintf(out, "    %s\n    %s^\n", line, strings.Repeat(" ", column))
+			_, _ = fmt.Fprintf(out, "    %s\n    %s^\n", line, strings.Repeat(" ", column))
 		}
 
 		if f.Detail != "" {
-			fmt.Fprintf(out, "    %s\n", f.Detail)
+			_, _ = fmt.Fprintf(out, "    %s\n", f.Detail)
 		}
 
-		fmt.Fprintln(out)
+		if f.Fix != "" {
+			_, _ = fmt.Fprintln(out, "    a rewrite is available: mig lint --fix")
+		}
+
+		_, _ = fmt.Fprintln(out)
 	}
 
-	fmt.Fprintf(out, "%d finding(s): %d error(s), %d warning(s)\n", len(findings), errors, warnings)
+	_, _ = fmt.Fprintf(out, "%d finding(s): %d error(s), %d warning(s)\n", len(findings), errors, warnings)
 
 	if _, err := io.WriteString(w, out.String()); err != nil {
 		return fmt.Errorf("write report: %w", err)

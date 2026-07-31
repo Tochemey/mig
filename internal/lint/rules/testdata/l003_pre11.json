@@ -11,7 +11,8 @@
         "start": 50,
         "end": 98,
         "line": 2
-      }
+      },
+      "fix": "-- +mig step: add_users_score_nullable\n-- the column arrives nullable and empty: catalog only, no rewrite\nALTER TABLE users ADD COLUMN score int;\n\n-- +mig step: set_users_score_default\n-- future rows get the default; existing rows are left to the backfill\nALTER TABLE users ALTER COLUMN score SET DEFAULT 0;\n\n-- +mig step: backfill_users_score\n-- +mig backfill: table=users key=id batch=5000\n-- +mig satisfied: sql(SELECT NOT EXISTS (SELECT 1 FROM users WHERE score IS NULL))\n-- batched so each transaction stays short; key=id is assumed, point it at the primary key if that is not right\nUPDATE users SET score = 0 WHERE id \u003e :cursor_lo AND id \u003c= :cursor_hi AND score IS NULL;\n"
     }
   ]
 }

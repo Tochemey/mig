@@ -28,6 +28,7 @@ import (
 
 	pgquery "github.com/pganalyze/pg_query_go/v6"
 
+	"github.com/tochemey/mig/internal/lint/fix"
 	"github.com/tochemey/mig/internal/lint/lockmodel"
 )
 
@@ -60,16 +61,45 @@ func (l003) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 			continue
 		}
 
-		effect := lockmodel.AnalyzeAddColumn(table, cmd.GetDef().GetColumnDef(), ctx.TargetVersion)
+		column := cmd.GetDef().GetColumnDef()
+
+		effect := lockmodel.AnalyzeAddColumn(table, column, ctx.TargetVersion)
 		if effect.Duration != lockmodel.Rewrite {
 			continue
 		}
 
-		findings = append(findings, finding(SeverityWarn, fmt.Sprintf(
+		found := finding(SeverityWarn, fmt.Sprintf(
 			"ADD COLUMN rewrites %s under ACCESS EXCLUSIVE (%s); "+
 				"add the column nullable, backfill in batches, then constrain it",
-			qualified(schema, name), effect.Reason), ctx)...)
+			qualified(schema, name), effect.Reason), ctx)
+
+		if def, notNull, ok := fixableAddColumn(column); ok && len(cmds) == 1 {
+			found = withFix(found, fix.AddColumnWithDefault(alter.GetRelation(), column, def, notNull))
+		}
+
+		findings = append(findings, found...)
 	}
 
 	return findings
+}
+
+// fixableAddColumn reports whether the expand route replaces the column
+// faithfully: the rewrite must come from a default, and nothing beyond NOT
+// NULL may ride on the column. A serial, identity, generated or constrained
+// column needs a fix this rule cannot write.
+func fixableAddColumn(column *pgquery.ColumnDef) (def *pgquery.Node, notNull, ok bool) {
+	for _, node := range column.GetConstraints() {
+		switch c := node.GetConstraint(); c.GetContype() {
+		case pgquery.ConstrType_CONSTR_DEFAULT:
+			def = c.GetRawExpr()
+
+		case pgquery.ConstrType_CONSTR_NOTNULL:
+			notNull = true
+
+		default:
+			return nil, false, false
+		}
+	}
+
+	return def, notNull, def != nil
 }

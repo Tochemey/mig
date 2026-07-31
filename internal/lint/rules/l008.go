@@ -27,6 +27,8 @@ import (
 	"fmt"
 
 	pgquery "github.com/pganalyze/pg_query_go/v6"
+
+	"github.com/tochemey/mig/internal/lint/fix"
 )
 
 // l008 flags ADD PRIMARY KEY without USING INDEX, whether as a constraint or
@@ -55,10 +57,19 @@ func (l008) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 			continue
 		}
 
-		findings = append(findings, finding(SeverityWarn, fmt.Sprintf(
+		found := finding(SeverityWarn, fmt.Sprintf(
 			"ADD PRIMARY KEY builds its index while blocking all access to %s; "+
 				"build a unique index concurrently first and adopt it with USING INDEX",
-			qualified(schema, name)), ctx)...)
+			qualified(schema, name)), ctx)
+
+		// Only the constraint form is replaced; a key inline on a new column
+		// would need the column split out first.
+		constraint := cmd.GetDef().GetConstraint()
+		if cmd.GetSubtype() == pgquery.AlterTableType_AT_AddConstraint && len(cmds) == 1 {
+			found = withFix(found, fix.PrimaryKeyViaIndex(alter.GetRelation(), constraint))
+		}
+
+		findings = append(findings, found...)
 	}
 
 	return findings
