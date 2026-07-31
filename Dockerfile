@@ -12,9 +12,12 @@ FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
 ARG TARGETARCH
 
 # The cross toolchain is only needed when the target differs from the host.
+# libc6-dev-arm64-cross is spelled out because gcc-aarch64-linux-gnu only
+# recommends it, and cgo cannot compile against a target with no libc headers.
 RUN if [ "$TARGETARCH" != "$(dpkg --print-architecture)" ]; then \
         apt-get update \
-        && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu \
+        && apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
