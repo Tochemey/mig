@@ -1,0 +1,26 @@
+name: Documentation issue
+description: The docs are wrong, unclear or missing something
+title: "docs: "
+labels: ["documentation"]
+body:
+  - type: input
+    id: where
+    attributes:
+      label: Where
+      description: A link or section name, e.g. README "Migration format".
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What is wrong or missing
+      description: >
+        What the docs say now and what tripped you up — or what you looked for
+        and could not find.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested wording
+      description: Optional. A sentence or two in the direction you would want.

@@ -1,0 +1,44 @@
+name: Performance problem
+description: A migration, backfill or verify runs slower than it should
+title: "perf: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-is-slow
+    attributes:
+      label: What is slow
+      description: The step or command, and what it was doing when it was slow.
+    validations:
+      required: true
+  - type: textarea
+    id: numbers
+    attributes:
+      label: Numbers
+      description: >
+        Durations, row counts and batch sizes. The JSON summary on stdout
+        carries per-step durations; for a backfill, the batch setting and
+        max_lag_bytes if set.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: >
+        Table sizes, whether replicas are attached, and anything unusual about
+        the database (partitioning, extensions, connection pooler).
+    validations:
+      required: true
+  - type: input
+    id: mig-version
+    attributes:
+      label: mig version
+      description: The output of `mig --version`.
+    validations:
+      required: true
+  - type: input
+    id: postgres-version
+    attributes:
+      label: Postgres version
+    validations:
+      required: true

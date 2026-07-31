@@ -1,0 +1,67 @@
+name: Bug report
+description: mig did something wrong, or failed when it should not have
+title: "fix: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, check existing issues for the same problem. A migration
+        file that reproduces the bug is worth more than any description.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What mig did, including the exact error if there was one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce it
+      description: >
+        The migration file (or the smallest part of it that still fails), the
+        command you ran, and the state the database was in.
+      placeholder: |
+        -- +mig step: ...
+
+        mig up --dir migrations
+    validations:
+      required: true
+  - type: input
+    id: mig-version
+    attributes:
+      label: mig version
+      description: The output of `mig --version`.
+    validations:
+      required: true
+  - type: input
+    id: postgres-version
+    attributes:
+      label: Postgres version
+    validations:
+      required: true
+  - type: dropdown
+    id: how-run
+    attributes:
+      label: How you run mig
+      options:
+        - CLI (go install)
+        - Docker image
+        - Go library (pkg/mig)
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and output
+      description: >
+        The JSON summary from stdout, and if you have it, the output of a run
+        with --verbose.
+      render: shell

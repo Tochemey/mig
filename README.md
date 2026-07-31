@@ -63,7 +63,17 @@ The library:
 go get github.com/tochemey/mig
 ```
 
-Requirements for both:
+The container image, published on every release tag for linux amd64 and arm64.
+The parser is compiled in, so running it needs no Go toolchain or C compiler:
+
+```sh
+docker run --rm \
+  -v "$PWD/migrations:/migrations" \
+  -e MIG_DSN="postgres://user:pass@db:5432/app?sslmode=disable" \
+  ghcr.io/tochemey/mig:latest up --dir /migrations
+```
+
+Requirements for building from source:
 
 - Go 1.26 or later, with cgo enabled. mig parses SQL with the real Postgres grammar through [pg_query_go](https://github.com/pganalyze/pg_query_go) instead of regular expressions, so quoted identifiers, embedded comments, partial indexes and multi-line statements are read the way the server reads them.
 - Postgres. The test matrices run against 17 and 18 on every change.
@@ -152,15 +162,19 @@ Two things make this safe when more than one runner starts:
 
 Migrations are hand-written SQL files named `<version>_<name>.sql` and applied in version order. The version is the leading run of digits: a timestamp by convention, or a sequence number in a history adopted from another tool.
 
-Annotations are SQL comments, so a migration file is still valid SQL:
+No annotation is mandatory. A plain `.sql` file with none at all is a valid migration: the whole file runs as one transactional step named `step_1`. Annotations come in when a step departs from that default — to split a file into steps, to leave the transaction, or to batch a data change.
 
-| Annotation                                                    | Effect                                                                                                      |
-|---------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------|
-| `-- +mig step: <name>`                                        | Starts a step. SQL before the first one becomes a step named `step_1`.                                      |
-| `-- +mig notx`                                                | Run outside a transaction, for `CREATE INDEX CONCURRENTLY`, `VALIDATE CONSTRAINT` and similar.              |
-| `-- +mig backfill: table=T key=K [batch=N] [max_lag_bytes=N]` | A resumable, batched data change.                                                                           |
-| `-- +mig satisfied: sql(<expr>)`                              | Supply the done-condition yourself when it cannot be inferred. The expression must return a single boolean. |
-| `-- +mig no_lock_timeout`                                     | Drop the default `lock_timeout` for this step.                                                              |
+An annotation is a comment line starting with `-- +mig `, so a migration file is still valid SQL. It applies to the step it appears in: `step:` starts the next step, and any other annotation before the first `step:` starts an implicit one. An annotation mig does not recognise is an error when the file loads, not a comment to skip, so a typo cannot silently drop an instruction.
+
+| Annotation                                                    | Required                                                                                                                 | Effect                                                                                                      |
+|---------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------|
+| `-- +mig step: <name>`                                        | Never. A file with no `step:` lines is one step named `step_1`.                                                          | Starts a step. The SQL that follows belongs to it.                                                          |
+| `-- +mig notx`                                                | On every step holding a statement Postgres refuses inside a transaction: `CREATE INDEX CONCURRENTLY`, `VALIDATE CONSTRAINT` and similar. Never inferred from the SQL. | Runs the step outside a transaction.                                                                        |
+| `-- +mig backfill: table=T key=K [batch=N] [max_lag_bytes=N]` | For any batched data change. `table` and `key` are required; the bracketed settings are optional.                        | A resumable, batched data change of exactly one statement.                                                  |
+| `-- +mig satisfied: sql(<expr>)`                              | On every backfill, and on a `notx` step whose condition cannot be inferred.                                              | Supply the done-condition yourself when it cannot be inferred. The expression must return a single boolean. |
+| `-- +mig no_lock_timeout`                                     | Never.                                                                                                                   | Drop the default `lock_timeout` for this step.                                                              |
+
+`notx` is the one requirement not caught before run time: mig never changes a step's kind from its SQL, so a `CREATE INDEX CONCURRENTLY` in a step without `notx` fails when Postgres refuses to run it inside the step's transaction. Everything else is checked as the files load, before anything is applied: a backfill missing `table=`, `key=` or `satisfied:`, a `satisfied:` in any form other than `sql(<expr>)`, a `notx` step with no condition, a step with no SQL, and a backfill holding more than one statement are all rejected by `mig plan` and at the start of `mig up`.
 
 ### Step kinds
 

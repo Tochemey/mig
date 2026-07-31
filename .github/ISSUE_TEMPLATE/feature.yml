@@ -1,0 +1,28 @@
+name: Feature request
+description: Something mig should do that it does not
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What you are trying to do and where mig stops short. The problem is
+        more useful than the solution: a different fix may fall out of it.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: What mig would do, as concretely as you can put it.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: >
+        Workarounds you tried, other tools that do it, or why the existing
+        annotations do not cover it.

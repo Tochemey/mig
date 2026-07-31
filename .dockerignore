@@ -1,0 +1,20 @@
+# Keep the build context to what `go build ./cmd/mig` needs. vendor is excluded
+# so local builds resolve modules the same way CI does: via go mod download.
+.git
+.github
+.claude
+.cover
+.local
+.tools
+.idea
+.vscode
+.trunk
+.gocache
+.gomodcache
+.cache
+vendor
+docs
+scripts
+Dockerfile
+Makefile
+*.md

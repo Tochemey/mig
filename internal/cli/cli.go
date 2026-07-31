@@ -37,8 +37,9 @@ import (
 	"github.com/tochemey/mig/pkg/mig"
 )
 
-// Version identifies this build in application_name and in logs.
-const Version = "0.1.0"
+// Version identifies this build in application_name and in logs. It is a var
+// so a release build can stamp the tag over it with -ldflags -X.
+var Version = "0.1.0"
 
 // Exit codes. They are part of the interface: a job scheduler has to tell
 // "another runner is applying" from "the migration failed".
