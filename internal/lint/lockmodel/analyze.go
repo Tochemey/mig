@@ -49,6 +49,12 @@ func Analyze(sql string, version int) (Analysis, error) {
 	return analyze(tree.Stmts[0].GetStmt(), version), nil
 }
 
+// AnalyzeStatement predicts the locks of an already parsed statement, for a
+// caller that holds the tree and should not pay for a second parse.
+func AnalyzeStatement(stmt *pgquery.RawStmt, version int) Analysis {
+	return analyze(stmt.GetStmt(), version)
+}
+
 // analyze dispatches one parsed statement to its handler.
 func analyze(node *pgquery.Node, version int) Analysis {
 	switch {

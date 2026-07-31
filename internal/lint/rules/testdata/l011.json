@@ -1,0 +1,17 @@
+{
+  "findings": [
+    {
+      "rule": "L011",
+      "severity": "warn",
+      "message": "REFRESH MATERIALIZED VIEW blocks reads of user_stats until the refresh finishes; use CONCURRENTLY, which needs a unique index on the view",
+      "detail": "ACCESS EXCLUSIVE on user_stats, held for a table rewrite; blocks reads and writes",
+      "file": "1_l011.sql",
+      "step": "flagged",
+      "span": {
+        "start": 22,
+        "end": 58,
+        "line": 2
+      }
+    }
+  ]
+}

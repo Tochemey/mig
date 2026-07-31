@@ -1,0 +1,30 @@
+{
+  "findings": [
+    {
+      "rule": "L003",
+      "severity": "warn",
+      "message": "ADD COLUMN rewrites users under ACCESS EXCLUSIVE (table rewrite: volatile default evaluated per row); add the column nullable, backfill in batches, then constrain it",
+      "detail": "ACCESS EXCLUSIVE on users, held for a table rewrite; blocks reads and writes",
+      "file": "1_l003.sql",
+      "step": "volatile_default",
+      "span": {
+        "start": 31,
+        "end": 96,
+        "line": 2
+      }
+    },
+    {
+      "rule": "L004",
+      "severity": "warn",
+      "message": "changing a column type rewrites users under ACCESS EXCLUSIVE; add a new column, backfill, swap reads, then drop the old one",
+      "detail": "ACCESS EXCLUSIVE on users, held for a table rewrite; blocks reads and writes",
+      "file": "1_l003.sql",
+      "step": "sibling_rewrite_is_not_the_columns_fault",
+      "span": {
+        "start": 483,
+        "end": 553,
+        "line": 17
+      }
+    }
+  ]
+}

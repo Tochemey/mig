@@ -1,0 +1,17 @@
+{
+  "findings": [
+    {
+      "rule": "L007",
+      "severity": "warn",
+      "message": "ADD CHECK scans users under ACCESS EXCLUSIVE; add it NOT VALID, then VALIDATE CONSTRAINT in its own step",
+      "detail": "ACCESS EXCLUSIVE on users, held for a full scan; blocks reads and writes",
+      "file": "1_l007.sql",
+      "step": "flagged",
+      "span": {
+        "start": 22,
+        "end": 93,
+        "line": 2
+      }
+    }
+  ]
+}

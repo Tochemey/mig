@@ -1,0 +1,17 @@
+{
+  "findings": [
+    {
+      "rule": "L001",
+      "severity": "warn",
+      "message": "CREATE INDEX without CONCURRENTLY blocks writes to users for the whole build; add CONCURRENTLY and mark the step notx",
+      "detail": "SHARE on users, held for an index build; blocks writes",
+      "file": "1_l001.sql",
+      "step": "flagged",
+      "span": {
+        "start": 22,
+        "end": 67,
+        "line": 2
+      }
+    }
+  ]
+}

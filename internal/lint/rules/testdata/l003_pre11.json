@@ -1,0 +1,17 @@
+{
+  "findings": [
+    {
+      "rule": "L003",
+      "severity": "warn",
+      "message": "ADD COLUMN rewrites users under ACCESS EXCLUSIVE (table rewrite: add column with default before Postgres 11); add the column nullable, backfill in batches, then constrain it",
+      "detail": "ACCESS EXCLUSIVE on users, held for a table rewrite; blocks reads and writes",
+      "file": "1_l003_pre11.sql",
+      "step": "constant_default_rewrites_before_11",
+      "span": {
+        "start": 50,
+        "end": 98,
+        "line": 2
+      }
+    }
+  ]
+}

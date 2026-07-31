@@ -28,6 +28,8 @@ import (
 	"strings"
 	"testing"
 
+	pgquery "github.com/pganalyze/pg_query_go/v6"
+
 	"github.com/tochemey/mig/internal/lint/lockmodel"
 )
 
@@ -82,6 +84,22 @@ func run(t *testing.T, cases []analyzeCase) {
 				t.Errorf("Analyze(%q, %d)\n got %+v\nwant %+v", tc.sql, version, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestAnalyzeStatement(t *testing.T) {
+	const sql = "CREATE INDEX idx ON users (name)"
+
+	tree, err := pgquery.Parse(sql)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	fromTree := lockmodel.AnalyzeStatement(tree.Stmts[0], current)
+	fromText := analyze(t, sql, current)
+
+	if !reflect.DeepEqual(fromTree, fromText) {
+		t.Errorf("AnalyzeStatement = %+v, Analyze = %+v", fromTree, fromText)
 	}
 }
 

@@ -24,7 +24,10 @@
 package lockmodel_test
 
 import (
+	"reflect"
 	"testing"
+
+	pgquery "github.com/pganalyze/pg_query_go/v6"
 
 	"github.com/tochemey/mig/internal/lint/lockmodel"
 )
@@ -174,6 +177,27 @@ func TestAlterTableAddColumn(t *testing.T) {
 				"table rewrite: volatile default evaluated per row"),
 		},
 	})
+}
+
+// TestAnalyzeAddColumn pins the per-action entry point to the whole-statement
+// analysis: one action, same effect either way.
+func TestAnalyzeAddColumn(t *testing.T) {
+	const sql = "ALTER TABLE t ADD COLUMN c float DEFAULT random()"
+
+	tree, err := pgquery.Parse(sql)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	column := tree.Stmts[0].GetStmt().GetAlterTableStmt().
+		GetCmds()[0].GetAlterTableCmd().GetDef().GetColumnDef()
+
+	effect := lockmodel.AnalyzeAddColumn(lockmodel.Relation{Name: "t"}, column, current)
+
+	whole := analyze(t, sql, current)
+	if !reflect.DeepEqual([]lockmodel.LockEffect{effect}, whole.Effects) {
+		t.Errorf("AnalyzeAddColumn = %+v, Analyze effects = %+v", effect, whole.Effects)
+	}
 }
 
 func TestAlterTableColumns(t *testing.T) {

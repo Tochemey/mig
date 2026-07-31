@@ -1,0 +1,17 @@
+{
+  "findings": [
+    {
+      "rule": "L006",
+      "severity": "warn",
+      "message": "ADD FOREIGN KEY validates every row of orders while blocking writes to both it and users; add the key NOT VALID, then VALIDATE CONSTRAINT in its own step",
+      "detail": "SHARE ROW EXCLUSIVE on orders, held for a full scan; blocks writes",
+      "file": "1_l006.sql",
+      "step": "flagged",
+      "span": {
+        "start": 22,
+        "end": 114,
+        "line": 2
+      }
+    }
+  ]
+}

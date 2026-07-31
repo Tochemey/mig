@@ -1,0 +1,43 @@
+{
+  "findings": [
+    {
+      "rule": "L005",
+      "severity": "warn",
+      "message": "SET NOT NULL scans users under ACCESS EXCLUSIVE to verify \"email\"; add CHECK (email IS NOT NULL) NOT VALID, validate it, then set NOT NULL",
+      "detail": "ACCESS EXCLUSIVE on users, held for a full scan; blocks reads and writes",
+      "file": "1_l005.sql",
+      "step": "unprotected",
+      "span": {
+        "start": 26,
+        "end": 75,
+        "line": 2
+      }
+    },
+    {
+      "rule": "L005",
+      "severity": "warn",
+      "message": "SET NOT NULL scans payments under ACCESS EXCLUSIVE to verify \"ref\"; add CHECK (ref IS NOT NULL) NOT VALID, validate it, then set NOT NULL",
+      "detail": "ACCESS EXCLUSIVE on payments, held for a full scan; blocks reads and writes",
+      "file": "1_l005.sql",
+      "step": "proof_on_another_table_does_not_count",
+      "span": {
+        "start": 610,
+        "end": 660,
+        "line": 20
+      }
+    },
+    {
+      "rule": "L005",
+      "severity": "warn",
+      "message": "SET NOT NULL scans users under ACCESS EXCLUSIVE to verify \"flag2\"; add CHECK (flag2 IS NOT NULL) NOT VALID, validate it, then set NOT NULL",
+      "detail": "ACCESS EXCLUSIVE on users, held for a full scan; blocks reads and writes",
+      "file": "1_l005.sql",
+      "step": "combined",
+      "span": {
+        "start": 1201,
+        "end": 1275,
+        "line": 38
+      }
+    }
+  ]
+}

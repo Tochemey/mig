@@ -105,6 +105,13 @@ func alterAction(table Relation, cmd *pgquery.AlterTableCmd, version int) ([]Loc
 	}
 }
 
+// AnalyzeAddColumn classifies one ADD COLUMN action in isolation. A
+// multi-action ALTER TABLE mixes every action's effects in one analysis; a
+// caller attributing a cost to the right action asks per column.
+func AnalyzeAddColumn(table Relation, column *pgquery.ColumnDef, version int) LockEffect {
+	return addColumn(table, column, version)[0]
+}
+
 // addColumn classifies ADD COLUMN by what fills the new column. A column
 // backed by nothing, or by a default the server can store as a missing value,
 // is catalog work; one backed by a volatile default, a sequence or a stored

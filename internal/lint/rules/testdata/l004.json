@@ -1,0 +1,43 @@
+{
+  "findings": [
+    {
+      "rule": "L004",
+      "severity": "warn",
+      "message": "changing a column type rewrites users under ACCESS EXCLUSIVE; add a new column, backfill, swap reads, then drop the old one",
+      "detail": "ACCESS EXCLUSIVE on users, held for a table rewrite; blocks reads and writes",
+      "file": "1_l004.sql",
+      "step": "flagged",
+      "span": {
+        "start": 22,
+        "end": 67,
+        "line": 2
+      }
+    },
+    {
+      "rule": "L004",
+      "severity": "warn",
+      "message": "changing a column type rewrites ops.audit2 under ACCESS EXCLUSIVE; add a new column, backfill, swap reads, then drop the old one",
+      "detail": "ACCESS EXCLUSIVE on ops.audit2, held for a table rewrite; blocks reads and writes",
+      "file": "1_l004.sql",
+      "step": "same_name_in_another_schema_still_flagged",
+      "span": {
+        "start": 344,
+        "end": 394,
+        "line": 14
+      }
+    },
+    {
+      "rule": "L004",
+      "severity": "warn",
+      "message": "changing a column type rewrites cache under ACCESS EXCLUSIVE; add a new column, backfill, swap reads, then drop the old one",
+      "detail": "ACCESS EXCLUSIVE on cache, held for a table rewrite; blocks reads and writes",
+      "file": "1_l004.sql",
+      "step": "alter_before_recreate_hits_live_rows",
+      "span": {
+        "start": 448,
+        "end": 492,
+        "line": 17
+      }
+    }
+  ]
+}
