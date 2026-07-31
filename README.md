@@ -162,7 +162,7 @@ Two things make this safe when more than one runner starts:
 
 Migrations are hand-written SQL files named `<version>_<name>.sql` and applied in version order. The version is the leading run of digits: a timestamp by convention, or a sequence number in a history adopted from another tool.
 
-No annotation is mandatory. A plain `.sql` file with none at all is a valid migration: the whole file runs as one transactional step named `step_1`. Annotations come in when a step departs from that default — to split a file into steps, to leave the transaction, or to batch a data change.
+No annotation is mandatory. A plain `.sql` file with none at all is a valid migration: the whole file runs as one transactional step named `step_1`. Annotations come in when a step departs from that default: to split a file into steps, to leave the transaction, or to batch a data change.
 
 An annotation is a comment line starting with `-- +mig `, so a migration file is still valid SQL. It applies to the step it appears in: `step:` starts the next step, and any other annotation before the first `step:` starts an implicit one. An annotation mig does not recognise is an error when the file loads, not a comment to skip, so a typo cannot silently drop an instruction.
 
@@ -242,7 +242,7 @@ Run `mig <command> --help` for flags.
 
 Every setting is a flag. Three of them also read an environment variable, which supplies the default when the flag is absent. An explicit flag always wins.
 
-| Flag            | Environment     | Default      | Commands                                          | Meaning                                                                                                                                                                                                    |
+| Flag&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Environment     | Default      | Commands                                          | Meaning                                                                                                                                                                                                    |
 |-----------------|-----------------|--------------|---------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `--dsn`         | `MIG_DSN`       | none         | `up`, `verify`, `status`, `import`, `fingerprint` | Postgres connection string. Required. The command fails before connecting if it is empty.                                                                                                                  |
 | `--dir`         | `MIG_DIR`       | `migrations` | `up`, `plan`, `verify`, `import`                  | Directory holding the migration files.                                                                                                                                                                     |

@@ -15,7 +15,7 @@ body:
     attributes:
       label: What is wrong or missing
       description: >
-        What the docs say now and what tripped you up — or what you looked for
+        What the docs say now and what tripped you up, or what you looked for
         and could not find.
     validations:
       required: true
