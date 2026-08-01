@@ -74,7 +74,8 @@ func newLintCommand() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if fix {
-				return runLintFix(dir, format, version, yes, cmd.OutOrStdout(), cmd.InOrStdin())
+				return runLintFix(cmd.Context(), dir, dsn, format, version, yes,
+					cmd.OutOrStdout(), cmd.InOrStdin())
 			}
 
 			return runLint(cmd.Context(), dir, dsn, format, version, cmd.OutOrStdout())
@@ -94,12 +95,17 @@ func newLintCommand() *cobra.Command {
 }
 
 // runLintFix shows the rewrites as a diff and applies them once confirmed.
-func runLintFix(dir, format string, version int, yes bool, stdout io.Writer, stdin io.Reader) error {
+//
+// It reads the catalog when a database was named, exactly as a report does: a
+// generated backfill pages by the table's real primary key rather than by an
+// assumption, and the fix is the one output that ends up in the author's file.
+func runLintFix(ctx context.Context, dir, dsn, format string, version int, yes bool,
+	stdout io.Writer, stdin io.Reader) error {
 	if format != formatHuman {
 		return fmt.Errorf("--fix renders a diff and takes no --format")
 	}
 
-	linted, err := mig.Lint(os.DirFS(dir), version)
+	linted, err := lintReport(ctx, dir, dsn, version)
 	if err != nil {
 		return err
 	}
@@ -132,8 +138,7 @@ func runLint(ctx context.Context, dir, dsn, format string, version int, stdout i
 	// A reader told to expect estimates is owed the reason there are none.
 	if linted.Uncalibrated != "" && format == formatHuman {
 		if _, err := fmt.Fprintf(stdout,
-			"the server was not measured, so no work is estimated: %s\n",
-			linted.Uncalibrated); err != nil {
+			"the calibration probe reported: %s\n", linted.Uncalibrated); err != nil {
 			return fmt.Errorf("write report: %w", err)
 		}
 	}

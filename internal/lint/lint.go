@@ -126,23 +126,29 @@ func lintMigration(migration *plan.Migration, content string, version int,
 	cursor := 0
 
 	for stepIndex, s := range migration.Steps {
+		// The whole step is parsed and analysed before any rule sees any of
+		// it: a transactional step holds its locks to the commit, so the
+		// cross-statement rules need its statements together.
+		whole, err := analyseStep(s, version)
+		if err != nil {
+			return nil, fmt.Errorf("migration %q step %q: %w", migration.File, s.Name, err)
+		}
+
 		for stmtIndex, statement := range s.Statements {
 			span, next := locate(content, cursor, statement.SQL)
 			cursor = next
-
-			parsed, err := parseOne(statement.SQL)
-			if err != nil {
-				return nil, fmt.Errorf("migration %q step %q: %w", migration.File, s.Name, err)
-			}
 
 			ctx := rules.Context{
 				TargetVersion: version,
 				Migration:     migration,
 				StepIndex:     stepIndex,
 				StmtIndex:     stmtIndex,
-				Analysis:      lockmodel.AnalyzeStatement(parsed, version),
+				Analysis:      whole.Analysed[stmtIndex],
+				Step:          whole,
 				Stats:         snapshot,
 			}
+
+			parsed := whole.Parsed[stmtIndex]
 
 			for _, rule := range rules.All() {
 				for _, found := range rule.Check(ctx, parsed) {
@@ -165,6 +171,27 @@ func lintMigration(migration *plan.Migration, content string, version int,
 	}
 
 	return findings, nil
+}
+
+// analyseStep parses and analyses every statement of one step, once.
+func analyseStep(s plan.Step, version int) (rules.Step, error) {
+	whole := rules.Step{
+		Spec:     s,
+		Parsed:   make([]*pgquery.RawStmt, len(s.Statements)),
+		Analysed: make([]lockmodel.Analysis, len(s.Statements)),
+	}
+
+	for i, statement := range s.Statements {
+		parsed, err := parseOne(statement.SQL)
+		if err != nil {
+			return rules.Step{}, err
+		}
+
+		whole.Parsed[i] = parsed
+		whole.Analysed[i] = lockmodel.AnalyzeStatement(parsed, version)
+	}
+
+	return whole, nil
 }
 
 // parseOne re-parses a statement the plan already split, for the tree the

@@ -1,0 +1,30 @@
+{
+  "findings": [
+    {
+      "rule": "L022",
+      "severity": "info",
+      "message": "this index on users is built before the backfill that fills it, so every batch maintains it as it writes; move the index after the backfill",
+      "detail": "SHARE UPDATE EXCLUSIVE on users, held for an index build; blocks no traffic",
+      "file": "1_l022.sql",
+      "step": "flagged",
+      "span": {
+        "start": 35,
+        "end": 93,
+        "line": 3
+      }
+    },
+    {
+      "rule": "L022",
+      "severity": "info",
+      "message": "this index on app.audit is built before the backfill that fills it, so every batch maintains it as it writes; move the index after the backfill",
+      "detail": "SHARE UPDATE EXCLUSIVE on app.audit, held for an index build; blocks no traffic",
+      "file": "1_l022.sql",
+      "step": "flagged_qualified",
+      "span": {
+        "start": 639,
+        "end": 699,
+        "line": 21
+      }
+    }
+  ]
+}

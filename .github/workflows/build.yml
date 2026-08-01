@@ -130,3 +130,11 @@ jobs:
         run: docker pull "$MIG_PG_IMAGE"
       - name: Recovery and lease matrices
         run: go test ./test/... ./internal/lease/... ./internal/step/... -count=1 -timeout 30m
+
+      # A step of its own, after the rest: the linter's duration estimates are
+      # held to a measured rewrite, and a measurement taken while the other
+      # packages are running reports the load rather than the model.
+      - name: Estimate acceptance
+        env:
+          MIG_ESTIMATE: "1"
+        run: go test ./test/estimate/ -count=1 -timeout 15m -v

@@ -1,0 +1,17 @@
+{
+  "findings": [
+    {
+      "rule": "L020",
+      "severity": "warn",
+      "message": "flagged holds ACCESS EXCLUSIVE on orders and users at once, each until the step commits; give each table its own step so the windows do not overlap",
+      "detail": "ACCESS EXCLUSIVE on users, held for catalog work only; blocks reads and writes",
+      "file": "1_l020.sql",
+      "step": "flagged",
+      "span": {
+        "start": 22,
+        "end": 64,
+        "line": 2
+      }
+    }
+  ]
+}

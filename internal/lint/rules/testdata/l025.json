@@ -1,0 +1,17 @@
+{
+  "findings": [
+    {
+      "rule": "L025",
+      "severity": "error",
+      "message": "flagged waits for ACCESS EXCLUSIVE with the lock timeout off; a statement queued behind a long read blocks every reader that arrives after it, for as long as that read takes. Drop -- +mig no_lock_timeout from the step",
+      "detail": "ACCESS EXCLUSIVE on users, held for catalog work only; blocks reads and writes",
+      "file": "1_l025.sql",
+      "step": "flagged",
+      "span": {
+        "start": 46,
+        "end": 88,
+        "line": 3
+      }
+    }
+  ]
+}

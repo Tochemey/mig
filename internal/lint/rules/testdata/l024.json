@@ -1,0 +1,17 @@
+{
+  "findings": [
+    {
+      "rule": "L024",
+      "severity": "error",
+      "message": "\"curious\" was added to its type earlier in this transaction, and Postgres will refuse to use it here; add the value in a step of its own",
+      "detail": "ROW EXCLUSIVE on users, held for a full scan; blocks no traffic",
+      "file": "1_l024.sql",
+      "step": "flagged",
+      "span": {
+        "start": 59,
+        "end": 111,
+        "line": 3
+      }
+    }
+  ]
+}

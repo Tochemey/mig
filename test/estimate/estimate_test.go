@@ -26,6 +26,12 @@
 //
 // A number nobody checked is worse than no number, because it will be quoted
 // in a change review. This is the check.
+//
+// It is gated because it is a timing measurement, and a timing measurement
+// shares nothing well. Run inside a whole-suite run it competes with every
+// other package's containers, the probe and the rewrite it predicts see
+// different machines, and the comparison measures the load rather than the
+// model. CI runs it as a step of its own, on every change.
 package estimate_test
 
 import (
@@ -39,6 +45,10 @@ import (
 	"github.com/tochemey/mig/internal/lint/stats"
 	"github.com/tochemey/mig/test/harness"
 )
+
+// EnvEstimate turns the acceptance on. Without it the package skips, so a
+// whole-suite run does not fail on a number it was in no position to measure.
+const EnvEstimate = "MIG_ESTIMATE"
 
 // acceptanceRows is the table the design names: ten million.
 const acceptanceRows = 10_000_000
@@ -61,6 +71,10 @@ func TestMain(m *testing.M) {
 // making, estimates the rewrite of a ten-million-row table, then rewrites it
 // and compares.
 func TestEstimateLandsWithinTwiceTheTruth(t *testing.T) {
+	if os.Getenv(EnvEstimate) == "" {
+		t.Skipf("set %s to run the estimate acceptance, on a machine it has to itself", EnvEstimate)
+	}
+
 	if shared == nil {
 		t.Skip("postgres container not available")
 	}

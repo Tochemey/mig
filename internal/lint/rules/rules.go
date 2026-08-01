@@ -45,6 +45,7 @@ import (
 	"github.com/tochemey/mig/internal/lint/stats"
 	"github.com/tochemey/mig/internal/parse"
 	"github.com/tochemey/mig/internal/plan"
+	"github.com/tochemey/mig/internal/step"
 )
 
 // The rule IDs, spelled once here rather than at each rule and each test
@@ -61,6 +62,13 @@ const (
 	L009 = "L009" // inline UNIQUE in ADD COLUMN
 	L010 = "L010" // VACUUM FULL or CLUSTER in a migration
 	L011 = "L011" // REFRESH MATERIALIZED VIEW without CONCURRENTLY
+
+	L020 = "L020" // several ACCESS EXCLUSIVE statements in one transaction
+	L021 = "L021" // row work sharing a transaction with other DDL
+	L022 = "L022" // an index built before the backfill that fills it
+	L023 = "L023" // a foreign key added before the backfill that populates it
+	L024 = "L024" // an enum value used in the transaction that added it
+	L025 = "L025" // a blocking step with the lock timeout turned off
 )
 
 // The sizes at which a size-dependent hazard changes grade. The upper pair is
@@ -117,6 +125,22 @@ const (
 	// SeverityError marks a hazard that is wrong regardless of scale.
 	SeverityError
 )
+
+// count renders a quantity with its noun, pluralised.
+func count(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// transactional reports whether the step's statements share one transaction,
+// which is what makes the company a statement keeps its business. A notx step
+// has no transaction, and a backfill commits every batch.
+func transactional(ctx Context) bool {
+	return ctx.Step.Spec.Kind == step.KindDDLTx
+}
 
 // String renders the severity.
 func (s Severity) String() string {
@@ -175,6 +199,23 @@ type Finding struct {
 	FixScaffold bool   `json:"fix_scaffold,omitempty"`
 }
 
+// Step is the step a statement belongs to, with every statement in it already
+// parsed and analysed.
+//
+// It is what the cross-statement rules read. A transactional step holds its
+// locks until the last statement commits, so the hazard is often not in any
+// one statement but in the company it keeps.
+type Step struct {
+	// Spec is the step as the executor will run it.
+	Spec plan.Step
+
+	// Parsed and Analysed hold every statement of the step, in order and
+	// indexed alike, so a rule neither re-parses nor re-analyses what the
+	// engine already did.
+	Parsed   []*pgquery.RawStmt
+	Analysed []lockmodel.Analysis
+}
+
 // Context is what a rule sees beyond the statement itself.
 type Context struct {
 	// TargetVersion is the Postgres major the migration is written for.
@@ -191,6 +232,10 @@ type Context struct {
 
 	// Analysis is the lock model's prediction for the statement.
 	Analysis lockmodel.Analysis
+
+	// Step is the whole step this statement belongs to, for a rule about the
+	// shape of a transaction rather than about one statement.
+	Step Step
 
 	// Stats is what the catalog said about the relations this plan names,
 	// and is nil offline. A hazard whose cost is the table's size is graded
@@ -210,6 +255,7 @@ func All() []Rule {
 	return []Rule{
 		l001{}, l002{}, l003{}, l004{}, l005{}, l006{},
 		l007{}, l008{}, l009{}, l010{}, l011{},
+		l020{}, l021{}, l022{}, l023{}, l024{}, l025{},
 	}
 }
 

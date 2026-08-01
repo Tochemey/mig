@@ -54,7 +54,9 @@ const (
 	// AnnotationSatisfied carries an author-supplied predicate.
 	AnnotationSatisfied = "satisfied:"
 
-	annNoLockTimeout = "no_lock_timeout"
+	// AnnotationNoLockTimeout drops the default lock timeout for a step. The
+	// linter names it in the finding that asks for it back.
+	AnnotationNoLockTimeout = "no_lock_timeout"
 )
 
 // The fields of a backfill annotation. They are exported with the annotation
@@ -207,7 +209,7 @@ func apply(s *Step, annotation string) error {
 		s.Kind = step.KindDDLNoTx
 		return nil
 
-	case annNoLockTimeout:
+	case AnnotationNoLockTimeout:
 		s.NoLockTimeout = true
 		return nil
 	}

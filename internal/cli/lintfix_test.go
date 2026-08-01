@@ -36,6 +36,46 @@ import (
 	"github.com/tochemey/mig/internal/lint/rules"
 )
 
+// TestLintFixPagesByTheRealKeyWhenConnected covers the catalog reaching the
+// one output that ends up in the author's file. Offline the generated
+// backfill can only assume a key; given a database it reads the primary key,
+// and a table keyed by anything but id is where the difference shows.
+func TestLintFixPagesByTheRealKeyWhenConnected(t *testing.T) {
+	database := newDatabase(t)
+	dir := t.TempDir()
+
+	db, err := requireHarness(t).Open(t.Context(), database)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	defer func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close pool: %v", err)
+		}
+	}()
+
+	if _, err := db.ExecContext(t.Context(),
+		"CREATE TABLE accounts (account_id bigint PRIMARY KEY, name text)"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	write(t, dir, "20240817120000_token.sql", `-- +mig step: add_token
+ALTER TABLE accounts ADD COLUMN token uuid NOT NULL DEFAULT gen_random_uuid();
+`)
+
+	if _, _, err := run(t, "lint", "--fix", "--yes",
+		"--dir", dir, "--dsn", shared.DSN(database)); err != nil {
+		t.Fatalf("lint --fix: %v", err)
+	}
+
+	fixed := readBack(t, dir, "20240817120000_token.sql")
+
+	if !strings.Contains(fixed, "key=account_id") {
+		t.Errorf("the fix did not page by the table's own key:\n%s", fixed)
+	}
+}
+
 // unsafeMigration carries one fixable hazard and one that has no fix.
 const unsafeMigration = `-- +mig step: fk
 ALTER TABLE orders ADD CONSTRAINT orders_fk FOREIGN KEY (uid) REFERENCES users (id);
