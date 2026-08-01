@@ -28,6 +28,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -236,7 +237,10 @@ func TestLoad(t *testing.T) {
 		t.Fatalf("write policy: %v", err)
 	}
 
-	if _, err := policy.Load(path, "migrations"); err == nil || !strings.Contains(err.Error(), path) {
+	// The error quotes the path, and quoting escapes the backslashes a
+	// Windows temp directory is full of, so the expectation is the quoted
+	// form rather than the raw one.
+	if _, err := policy.Load(path, "migrations"); err == nil || !strings.Contains(err.Error(), strconv.Quote(path)) {
 		t.Errorf("err = %v, want it to name the file", err)
 	}
 }
