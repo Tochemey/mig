@@ -50,51 +50,78 @@ func (l020) Check(ctx Context, _ *pgquery.RawStmt) []Finding {
 		return nil
 	}
 
-	locked, statements := relationsLockedAt(ctx.Step.Analysed, lockmodel.AccessExclusive)
+	domains, statements := lockDomains(ctx)
 
-	// Two statements, and two tables between them. One statement locking a
-	// table and its own index is not two windows: it is one piece of work
-	// that cannot be split. Two statements against the same table are not
-	// two windows either, and doing them together is the better shape.
-	if statements < 2 || len(locked) < 2 {
+	// Two statements, and two lock domains between them. One statement
+	// locking a table and its own index is not two windows: it is one piece
+	// of work that cannot be split. Two statements against the same table
+	// are not two windows either, and doing them together is the better
+	// shape. Locks on what the step itself creates block nobody at all.
+	if statements < 2 || len(domains) < 2 {
 		return nil
 	}
 
 	return finding(SeverityWarn, fmt.Sprintf(
 		"%s holds ACCESS EXCLUSIVE on %s at once, each until the step commits; "+
 			"give each table its own step so the windows do not overlap",
-		ctx.Step.Spec.Name, strings.Join(locked, " and ")), ctx)
+		ctx.Step.Spec.Name, strings.Join(domains, " and ")), ctx)
 }
 
-// relationsLockedAt names every relation the step takes at least this mode on,
-// in a stable order and each once, and counts how many statements take it.
-func relationsLockedAt(analysed []lockmodel.Analysis,
-	mode lockmodel.LockMode) (locked []string, statements int) {
-	seen := make(map[string]bool)
+// lockDomains names the independent populations of traffic the step's ACCESS
+// EXCLUSIVE locks can stop, in a stable order, and counts the statements
+// taking one. An index is its table's traffic: dropping it locks the table
+// too. A view whose base is itself locked adds nothing, because every query
+// through the view already waits on the base.
+func lockDomains(ctx Context) (domains []string, statements int) {
+	locked := make(map[string]bool)
 
-	for _, analysis := range analysed {
-		takes := false
+	var effects []lockmodel.LockEffect
 
-		for _, effect := range analysis.Effects {
-			if effect.Mode < mode {
-				continue
-			}
-
-			takes = true
-
-			if name := effect.Relation.String(); !seen[name] {
-				seen[name] = true
-
-				locked = append(locked, name)
-			}
+	for i := range ctx.Step.Analysed {
+		found := blockableAt(ctx, i, lockmodel.AccessExclusive)
+		if len(found) == 0 {
+			continue
 		}
 
-		if takes {
-			statements++
+		statements++
+
+		for _, effect := range found {
+			locked[effect.Relation.Name] = true
+		}
+
+		effects = append(effects, found...)
+	}
+
+	seen := make(map[string]bool)
+
+	for _, effect := range effects {
+		name := effect.Relation.Name
+
+		if parent, ok := ctx.History.Parent(name); ok {
+			name = parent
+		} else if bases := ctx.History.ViewBases(name); covered(bases, locked) {
+			continue
+		}
+
+		if !seen[name] {
+			seen[name] = true
+
+			domains = append(domains, name)
 		}
 	}
 
-	slices.Sort(locked)
+	slices.Sort(domains)
 
-	return locked, statements
+	return domains, statements
+}
+
+// covered reports whether any of the view's bases is itself locked.
+func covered(bases []string, locked map[string]bool) bool {
+	for _, base := range bases {
+		if locked[base] {
+			return true
+		}
+	}
+
+	return false
 }

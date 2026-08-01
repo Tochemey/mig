@@ -62,7 +62,15 @@ func (l031) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 	}
 
 	from := qualified(schema, name)
+
 	if what == renamed[pgquery.ObjectType_OBJECT_COLUMN] {
+		// A column this migration itself added has a name nothing deployed
+		// has ever read; renaming it is scaffolding, not a break.
+		if ctx.History.ColumnAddedInFile(name, rename.GetSubname(),
+			ctx.Migration.File, ctx.StepIndex, ctx.StmtIndex) {
+			return nil
+		}
+
 		from += "." + rename.GetSubname()
 	}
 

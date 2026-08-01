@@ -15,6 +15,10 @@ CREATE INDEX idx_audit_id ON audit (id);
 CREATE TABLE metrics (id int);
 CREATE INDEX idx_metrics_id ON metrics (id);
 
+-- +mig step: plain_index_in_a_notx_step
+-- +mig notx
+CREATE INDEX idx_users_locale ON users (locale);
+
 -- +mig step: grant_audit
 GRANT SELECT ON audit TO application;
 

@@ -48,7 +48,12 @@ func (l001) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 
 	table := qualified(relation.GetSchemaname(), relation.GetRelname())
 
+	remedy := "add CONCURRENTLY and mark the step notx"
+	if !transactional(ctx) {
+		remedy = "add CONCURRENTLY"
+	}
+
 	return sized(ctx, relation.GetSchemaname(), relation.GetRelname(), fmt.Sprintf(
-		"CREATE INDEX without CONCURRENTLY blocks writes to %s for the whole build; "+
-			"add CONCURRENTLY and mark the step notx", table))
+		"CREATE INDEX without CONCURRENTLY blocks writes to %s for the whole build; %s",
+		table, remedy))
 }

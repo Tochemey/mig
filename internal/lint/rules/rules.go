@@ -41,6 +41,7 @@ import (
 	pgquery "github.com/pganalyze/pg_query_go/v6"
 
 	"github.com/tochemey/mig/internal/lint/fix"
+	"github.com/tochemey/mig/internal/lint/history"
 	"github.com/tochemey/mig/internal/lint/lockmodel"
 	"github.com/tochemey/mig/internal/lint/stats"
 	"github.com/tochemey/mig/internal/parse"
@@ -344,6 +345,11 @@ type Context struct {
 	// by it: without it, every such hazard stays a warning, because a linter
 	// that calls a 12-row lookup table an outage gets muted.
 	Stats *stats.Snapshot
+
+	// History is one pass over the whole plan: what it creates, which index
+	// belongs to which table, what a view reads, prior column types, and
+	// whether the lineage grants at all. Nil answers as an empty plan would.
+	History *history.History
 }
 
 // Rule inspects one statement.

@@ -45,6 +45,14 @@ func (l032) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 		return nil
 	}
 
+	// A lineage that never grants anything is not managing a restricted
+	// application role in its migrations, and every table it creates would
+	// warn forever. The rule earns its keep only where grant discipline
+	// exists to be broken.
+	if !ctx.History.HasGrants() {
+		return nil
+	}
+
 	relation := create.GetRelation()
 
 	schema, name := relation.GetSchemaname(), relation.GetRelname()

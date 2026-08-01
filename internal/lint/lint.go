@@ -37,6 +37,7 @@ import (
 
 	pgquery "github.com/pganalyze/pg_query_go/v6"
 
+	"github.com/tochemey/mig/internal/lint/history"
 	"github.com/tochemey/mig/internal/lint/lockmodel"
 	"github.com/tochemey/mig/internal/lint/policy"
 	"github.com/tochemey/mig/internal/lint/rules"
@@ -97,6 +98,7 @@ type Result struct {
 func Run(fsys fs.FS, p *plan.Plan, targetVersion int, snapshot *stats.Snapshot,
 	pol *policy.Policy) (*Result, error) {
 	result := &Result{Sources: make(map[string]string, len(p.Migrations))}
+	past := history.Build(p)
 
 	for i := range p.Migrations {
 		migration := &p.Migrations[i]
@@ -111,7 +113,7 @@ func Run(fsys fs.FS, p *plan.Plan, targetVersion int, snapshot *stats.Snapshot,
 		result.Sources[migration.File] = source
 		result.Suppressions = append(result.Suppressions, policy.Scan(migration, source)...)
 
-		found, err := lintMigration(migration, source, targetVersion, pol.Thresholds(), snapshot)
+		found, err := lintMigration(migration, source, targetVersion, pol.Thresholds(), snapshot, past)
 		if err != nil {
 			return nil, err
 		}
@@ -201,7 +203,7 @@ func sortFindings(findings []rules.Finding) {
 
 // lintMigration runs every rule over every statement of one migration.
 func lintMigration(migration *plan.Migration, content string, version int,
-	thresholds rules.Thresholds, snapshot *stats.Snapshot) ([]rules.Finding, error) {
+	thresholds rules.Thresholds, snapshot *stats.Snapshot, past *history.History) ([]rules.Finding, error) {
 	var findings []rules.Finding
 
 	cursor := 0
@@ -228,6 +230,7 @@ func lintMigration(migration *plan.Migration, content string, version int,
 				Step:          whole,
 				Thresholds:    thresholds,
 				Stats:         snapshot,
+				History:       past,
 			}
 
 			parsed := whole.Parsed[stmtIndex]

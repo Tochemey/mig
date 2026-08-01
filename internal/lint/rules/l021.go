@@ -56,7 +56,7 @@ func (l021) Check(ctx Context, _ *pgquery.RawStmt) []Finding {
 		return nil
 	}
 
-	long, ok := longestWork(ctx.Step.Analysed)
+	long, ok := longestWork(ctx)
 	if !ok {
 		return nil
 	}
@@ -64,11 +64,13 @@ func (l021) Check(ctx Context, _ *pgquery.RawStmt) []Finding {
 	// Only statements whose own locks stop traffic are being held hostage.
 	// A read or a write in the same step holds a lock too, but ACCESS SHARE
 	// and ROW EXCLUSIVE conflict with almost nothing, and counting them would
-	// turn a real finding into a bigger number rather than a truer one.
+	// turn a real finding into a bigger number rather than a truer one. A
+	// blocking lock on something the step itself creates stops nothing
+	// either, however strong its mode.
 	others := 0
 
-	for i, analysis := range ctx.Step.Analysed {
-		if _, blocking := blockingMode([]lockmodel.Analysis{analysis}); i != long.index && blocking {
+	for i := range ctx.Step.Analysed {
+		if i != long.index && len(blockableAt(ctx, i, lockmodel.Share)) > 0 {
 			others++
 		}
 	}
@@ -90,14 +92,20 @@ type heaviest struct {
 	effect lockmodel.LockEffect
 }
 
-// longestWork finds the step's heaviest row-by-row effect, and reports false
-// when every statement is catalog work.
-func longestWork(analysed []lockmodel.Analysis) (heaviest, bool) {
+// longestWork finds the step's heaviest row-by-row effect on a relation a
+// lock can block, and reports false when every such statement is catalog
+// work. A scan or build over a table this step creates runs against empty
+// storage: it is over in an instant and stretches nothing. Implicit effects
+// are passed over too: the referenced side of a foreign key carries the
+// validation's duration, but the rows scanned are the referencing table's,
+// and when that table is this step's own the scan is no work at all.
+func longestWork(ctx Context) (heaviest, bool) {
 	found := heaviest{}
 
-	for i, analysis := range analysed {
+	for i, analysis := range ctx.Step.Analysed {
 		for _, effect := range analysis.Effects {
-			if effect.Duration > found.effect.Duration {
+			if effect.Duration > found.effect.Duration && !effect.Implicit &&
+				blockable(ctx, effect.Relation, i) {
 				found = heaviest{index: i, effect: effect}
 			}
 		}

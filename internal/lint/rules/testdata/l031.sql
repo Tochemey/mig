@@ -13,5 +13,11 @@ CREATE TABLE staging (id int);
 -- +mig step: renaming_it_is_fine
 ALTER TABLE staging RENAME TO staging_v2;
 
+-- +mig step: scaffolding_column
+ALTER TABLE users ADD COLUMN nickname_tmp text;
+
+-- +mig step: renaming_this_migrations_own_column_is_fine
+ALTER TABLE users RENAME COLUMN nickname_tmp TO display_name;
+
 -- +mig step: grant_staging
 GRANT SELECT ON staging TO application;

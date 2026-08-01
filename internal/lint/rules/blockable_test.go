@@ -25,10 +25,8 @@ package rules_test
 
 import "testing"
 
-// TestL032 runs the rule's fixture: a table created and granted to nobody,
-// next to one granted by name and one covered by a schema-wide grant.
-func TestL032(t *testing.T) { golden(t, "l032") }
-
-// TestL032StaysQuietWithoutGrantDiscipline covers the lineage that never
-// grants: no restricted role is managed here, so no table warns.
-func TestL032StaysQuietWithoutGrantDiscipline(t *testing.T) { golden(t, "l032_nogrants") }
+// TestBlockable runs the fixture pinning what a lock cannot block: the
+// relations a step itself creates, a temporary table, and IF EXISTS drops of
+// relations the plan never made. The one step locking two pre-existing
+// relations, a recreation among them, stays flagged.
+func TestBlockable(t *testing.T) { golden(t, "blockable") }
