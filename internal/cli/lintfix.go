@@ -198,7 +198,9 @@ func stepStart(source string, offset int) (int, bool) {
 
 		line = previous
 
-		if isStepLine(text) {
+		// The loader's own recogniser, so a spacing variation it accepts is
+		// not misread here as a plain comment.
+		if _, isStep := plan.StepOf(text); isStep {
 			return line, true
 		}
 	}
@@ -225,17 +227,6 @@ func afterLeadingComments(source string, offset int) int {
 	}
 
 	return offset
-}
-
-// isStepLine recognises a step annotation the way the loader does, so a
-// spacing variation the loader accepts is not misread as a plain comment.
-func isStepLine(text string) bool {
-	body, ok := strings.CutPrefix(text, strings.TrimSpace(plan.AnnotationPrefix))
-	if !ok {
-		return false
-	}
-
-	return strings.HasPrefix(strings.TrimSpace(body), plan.AnnotationStep)
 }
 
 // pastSemicolon extends a statement span over its terminator, which the

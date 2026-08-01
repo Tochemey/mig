@@ -24,11 +24,9 @@
 package crash_test
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"regexp"
-	"syscall"
 	"testing"
 
 	"github.com/tochemey/mig/internal/crash"
@@ -50,19 +48,7 @@ func TestAtKillsArmedPoint(t *testing.T) {
 
 	err := reexec(t, crash.BeforeLeaseAcquire)
 
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Fatalf("child exited with %v, want a fatal signal", err)
-	}
-
-	status, ok := exitErr.Sys().(syscall.WaitStatus)
-	if !ok {
-		t.Fatalf("unexpected wait status type %T", exitErr.Sys())
-	}
-
-	if !status.Signaled() || status.Signal() != syscall.SIGKILL {
-		t.Fatalf("child exited with %v, want SIGKILL", exitErr)
-	}
+	died(t, err)
 }
 
 // TestAtIgnoresOtherPoints checks that arming one point leaves the others
@@ -103,21 +89,7 @@ func TestEveryPointFires(t *testing.T) {
 				os.Exit(0)
 			}
 
-			err := reexec(t, point)
-
-			var exitErr *exec.ExitError
-			if !errors.As(err, &exitErr) {
-				t.Fatalf("child exited with %v, want a fatal signal", err)
-			}
-
-			status, ok := exitErr.Sys().(syscall.WaitStatus)
-			if !ok {
-				t.Fatalf("unexpected wait status type %T", exitErr.Sys())
-			}
-
-			if !status.Signaled() || status.Signal() != syscall.SIGKILL {
-				t.Fatalf("child exited with %v, want SIGKILL", exitErr)
-			}
+			died(t, reexec(t, point))
 		})
 	}
 }

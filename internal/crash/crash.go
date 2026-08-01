@@ -29,7 +29,6 @@ package crash
 
 import (
 	"os"
-	"syscall"
 )
 
 // EnvPoint names the environment variable that arms a crash point.
@@ -84,18 +83,17 @@ const (
 // At terminates the process when point is the armed crash point, and does
 // nothing otherwise.
 //
-// It uses SIGKILL rather than os.Exit so that no deferred function runs, no
-// buffered write lands, and no connection is closed gracefully.
+// The process is killed rather than exited, so that no deferred function runs,
+// no buffered write lands, and no connection is closed gracefully. How that is
+// spelled is the one thing here that differs by platform: see kill_unix.go and
+// kill_windows.go.
 func At(point string) {
 	armed := os.Getenv(EnvPoint)
 	if armed == "" || armed != point {
 		return
 	}
 
-	// A failure has nowhere to go: the caller is a migration step, and the
-	// only reason the signal is refused is that this process is already
-	// leaving.
-	_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+	kill()
 }
 
 // Points lists every named crash point.

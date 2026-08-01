@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/tochemey/mig/internal/parse"
 	"github.com/tochemey/mig/internal/step"
@@ -57,6 +58,13 @@ const (
 	// AnnotationNoLockTimeout drops the default lock timeout for a step. The
 	// linter names it in the finding that asks for it back.
 	AnnotationNoLockTimeout = "no_lock_timeout"
+
+	// AnnotationLintIgnore suppresses one lint rule. The loader accepts it
+	// and does nothing with it: it is addressed to the linter. It is spelled
+	// as an annotation rather than as a plain comment so that silencing a
+	// rule on a migration that has already run leaves its checksum alone,
+	// annotations being no part of a step's SQL.
+	AnnotationLintIgnore = "lint:ignore"
 )
 
 // The fields of a backfill annotation. They are exported with the annotation
@@ -160,11 +168,18 @@ func scan(content string) ([]Step, error) {
 			continue
 		}
 
-		if name, isStep := strings.CutPrefix(annotation, AnnotationStep); isStep {
-			if err := begin(strings.TrimSpace(name)); err != nil {
+		if name, isStep := StepOf(line); isStep {
+			if err := begin(name); err != nil {
 				return nil, err
 			}
 
+			continue
+		}
+
+		// A lint directive is skipped before a step is opened for it, so one
+		// standing above the first step: line addresses the file rather than
+		// opening an empty step in front of it.
+		if _, isLint := LintIgnoreOf(line); isLint {
 			continue
 		}
 
@@ -200,6 +215,51 @@ func annotationOf(line string) (string, bool) {
 	}
 
 	return strings.TrimSpace(body), true
+}
+
+// StepOf returns the name a step annotation opens, and whether the line is
+// one. It is exported for the same reason as [LintIgnoreOf]: the linter reads
+// the file text alongside the loader, and one spelling of a step boundary is
+// the only way the two agree on which step a line belongs to.
+func StepOf(line string) (string, bool) {
+	annotation, ok := annotationOf(line)
+	if !ok {
+		return "", false
+	}
+
+	name, ok := strings.CutPrefix(annotation, AnnotationStep)
+	if !ok {
+		return "", false
+	}
+
+	return strings.TrimSpace(name), true
+}
+
+// LintIgnoreOf returns the body of a lint directive, and whether the line is
+// one.
+//
+// It is exported because the linter reads the directives out of the file text
+// itself, for the line numbers an audit of them needs, and the two must agree
+// on what one looks like: a line the loader waves through and the linter does
+// not read is a suppression nobody honours.
+func LintIgnoreOf(line string) (string, bool) {
+	annotation, ok := annotationOf(line)
+	if !ok {
+		return "", false
+	}
+
+	rest, ok := strings.CutPrefix(annotation, AnnotationLintIgnore)
+	if !ok {
+		return "", false
+	}
+
+	// "lint:ignoreL004" is a different word, and belongs in the loader's
+	// unknown-annotation error rather than in a directive nobody typed.
+	if rest != "" && !unicode.IsSpace(rune(rest[0])) {
+		return "", false
+	}
+
+	return strings.TrimSpace(rest), true
 }
 
 // apply records one annotation against the step being accumulated.

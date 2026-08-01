@@ -76,11 +76,12 @@ func TestL041FiresOnlyOnASizeTheCatalogGave(t *testing.T) {
 				t.Fatalf("load: %v", err)
 			}
 
-			findings, _, err := lint.Run(fsys, loaded, 18, tc.snapshot)
+			result, err := lint.Run(fsys, loaded, 18, tc.snapshot, nil)
 			if err != nil {
 				t.Fatalf("run: %v", err)
 			}
 
+			findings := result.Findings
 			fired := false
 
 			for _, finding := range findings {

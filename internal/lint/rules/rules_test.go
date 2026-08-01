@@ -73,14 +73,14 @@ func goldenAt(t *testing.T, id string, version int) {
 		t.Fatalf("load fixture: %v", err)
 	}
 
-	findings, _, err := lint.Run(fsys, loaded, version, nil)
+	result, err := lint.Run(fsys, loaded, version, nil, nil)
 	if err != nil {
 		t.Fatalf("lint fixture: %v", err)
 	}
 
 	var got bytes.Buffer
 
-	if err := report.JSON(&got, findings); err != nil {
+	if err := report.JSON(&got, result.Findings); err != nil {
 		t.Fatalf("render findings: %v", err)
 	}
 
@@ -113,10 +113,12 @@ func lintWith(t *testing.T, snapshot *stats.Snapshot) rules.Finding {
 		t.Fatalf("load: %v", err)
 	}
 
-	findings, _, err := lint.Run(fsys, loaded, 18, snapshot)
+	result, err := lint.Run(fsys, loaded, 18, snapshot, nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
+
+	findings := result.Findings
 
 	if len(findings) != 1 {
 		t.Fatalf("found %d findings, want the rewrite: %+v", len(findings), findings)
@@ -310,10 +312,12 @@ func TestGeneratedBackfillsPageByTheRealKey(t *testing.T) {
 				})
 			}
 
-			findings, _, err := lint.Run(fsys, loaded, 18, snapshot)
+			result, err := lint.Run(fsys, loaded, 18, snapshot, nil)
 			if err != nil {
 				t.Fatalf("run: %v", err)
 			}
+
+			findings := result.Findings
 
 			if len(findings) != 1 {
 				t.Fatalf("found %d findings, want the rewriting default: %+v", len(findings), findings)
@@ -351,6 +355,27 @@ func TestCatalogueIDs(t *testing.T) {
 
 	if len(seen) != 24 {
 		t.Errorf("catalog has %d rules, want 24", len(seen))
+	}
+}
+
+// TestEveryRuleIsDescribed pins the catalog's one description of itself: it
+// is what a code-scanning UI shows, and what tells a policy or a suppression
+// naming a real rule from one naming a typo.
+func TestEveryRuleIsDescribed(t *testing.T) {
+	for _, rule := range rules.All() {
+		if rules.Describe(rule.ID()) == "" {
+			t.Errorf("rule %s has no description", rule.ID())
+		}
+	}
+
+	// The linter's complaint about a directive it cannot honour is a rule id
+	// like any other, and is described alongside them.
+	if rules.Describe(rules.L000) == "" {
+		t.Error("L000 has no description")
+	}
+
+	if rules.Describe("L999") != "" {
+		t.Error("an id the catalog does not have came back described")
 	}
 }
 

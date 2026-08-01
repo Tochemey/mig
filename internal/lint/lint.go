@@ -38,6 +38,7 @@ import (
 	pgquery "github.com/pganalyze/pg_query_go/v6"
 
 	"github.com/tochemey/mig/internal/lint/lockmodel"
+	"github.com/tochemey/mig/internal/lint/policy"
 	"github.com/tochemey/mig/internal/lint/rules"
 	"github.com/tochemey/mig/internal/lint/stats"
 	"github.com/tochemey/mig/internal/plan"
@@ -74,35 +75,117 @@ func Relations(p *plan.Plan, targetVersion int) ([]lockmodel.Relation, error) {
 	return relations, nil
 }
 
-// Run lints every migration in the plan. It returns the findings ordered by
-// file and position, and the raw contents of each linted file, which is what
-// a renderer needs to show the offending line.
-//
-// The snapshot is what the catalog said about those relations, and is nil
-// offline: without it every size-dependent hazard stays a warning.
-func Run(fsys fs.FS, p *plan.Plan, targetVersion int, snapshot *stats.Snapshot) ([]rules.Finding, map[string]string, error) {
-	var findings []rules.Finding
+// Result is what linting a plan produces.
+type Result struct {
+	// Findings is ordered by file, position and rule.
+	Findings []rules.Finding
 
-	sources := make(map[string]string, len(p.Migrations))
+	// Sources maps each linted file to its contents, which is what a renderer
+	// needs to show the offending line.
+	Sources map[string]string
+
+	// Suppressions is every lint directive the files carry, in the order they
+	// appear, each marked with whether it silenced anything.
+	Suppressions []policy.Directive
+}
+
+// Run lints every migration in the plan.
+//
+// The snapshot is what the catalog said about the relations, and is nil
+// offline: without it every size-dependent hazard stays a warning. The policy
+// is what the team decided about the catalog, and may be nil.
+func Run(fsys fs.FS, p *plan.Plan, targetVersion int, snapshot *stats.Snapshot,
+	pol *policy.Policy) (*Result, error) {
+	result := &Result{Sources: make(map[string]string, len(p.Migrations))}
 
 	for i := range p.Migrations {
 		migration := &p.Migrations[i]
 
 		content, err := fs.ReadFile(fsys, migration.File)
 		if err != nil {
-			return nil, nil, fmt.Errorf("read migration: %w", err)
+			return nil, fmt.Errorf("read migration: %w", err)
 		}
 
-		sources[migration.File] = string(content)
+		source := string(content)
 
-		found, err := lintMigration(migration, string(content), targetVersion, snapshot)
+		result.Sources[migration.File] = source
+		result.Suppressions = append(result.Suppressions, policy.Scan(migration, source)...)
+
+		found, err := lintMigration(migration, source, targetVersion, pol.Thresholds(), snapshot)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
-		findings = append(findings, found...)
+		result.Findings = append(result.Findings, found...)
 	}
 
+	result.Findings = suppress(pol.Apply(result.Findings), result.Suppressions)
+
+	// A directive the linter cannot honour is a finding of its own, and is
+	// added after the suppressions have run: a broken suppression that could
+	// silence the complaint about itself would never be fixed.
+	result.Findings = append(result.Findings, problems(result.Suppressions)...)
+
+	sortFindings(result.Findings)
+
+	return result, nil
+}
+
+// suppress drops the findings the directives silence, and marks the
+// directives that silenced something.
+func suppress(findings []rules.Finding, directives []policy.Directive) []rules.Finding {
+	if len(directives) == 0 {
+		return findings
+	}
+
+	kept := make([]rules.Finding, 0, len(findings))
+
+	for _, finding := range findings {
+		silenced := false
+
+		// Every directive is offered the finding rather than the first match
+		// taken, so that two covering one finding are both counted as used
+		// and neither is reported as dead weight it is not.
+		for i := range directives {
+			if directives[i].Silences(finding) {
+				directives[i].Used = true
+				silenced = true
+			}
+		}
+
+		if !silenced {
+			kept = append(kept, finding)
+		}
+	}
+
+	return kept
+}
+
+// problems reports the directives the linter cannot honour: the ones naming
+// no rule, naming one this build does not have, or giving no reason.
+func problems(directives []policy.Directive) []rules.Finding {
+	var findings []rules.Finding
+
+	for _, directive := range directives {
+		if directive.Problem == "" {
+			continue
+		}
+
+		findings = append(findings, rules.Finding{
+			RuleID:   rules.L000,
+			Severity: rules.SeverityError,
+			Message:  fmt.Sprintf("this lint:ignore directive %s", directive.Problem),
+			File:     directive.File,
+			Step:     directive.Step,
+			Span:     directive.Span,
+		})
+	}
+
+	return findings
+}
+
+// sortFindings orders findings by file, position and rule.
+func sortFindings(findings []rules.Finding) {
 	sort.SliceStable(findings, func(i, j int) bool {
 		if findings[i].File != findings[j].File {
 			return findings[i].File < findings[j].File
@@ -114,13 +197,11 @@ func Run(fsys fs.FS, p *plan.Plan, targetVersion int, snapshot *stats.Snapshot) 
 
 		return findings[i].RuleID < findings[j].RuleID
 	})
-
-	return findings, sources, nil
 }
 
 // lintMigration runs every rule over every statement of one migration.
 func lintMigration(migration *plan.Migration, content string, version int,
-	snapshot *stats.Snapshot) ([]rules.Finding, error) {
+	thresholds rules.Thresholds, snapshot *stats.Snapshot) ([]rules.Finding, error) {
 	var findings []rules.Finding
 
 	cursor := 0
@@ -145,6 +226,7 @@ func lintMigration(migration *plan.Migration, content string, version int,
 				StmtIndex:     stmtIndex,
 				Analysis:      whole.Analysed[stmtIndex],
 				Step:          whole,
+				Thresholds:    thresholds,
 				Stats:         snapshot,
 			}
 

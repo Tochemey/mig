@@ -20,6 +20,7 @@ To contribute:
 | Go 1.26.5 or later                                 | The version in `go.mod`.                                                                                           |
 | cgo enabled                                        | `pg_query_go` links the Postgres parser.                                                                           |
 | Docker                                             | The test suite starts a real Postgres through testcontainers, spawns the migrator as a child process and kills it. |
+| Linux or macOS, to run the whole suite             | The kill matrices use POSIX process groups and signals. Windows builds and passes the unit tests, which is what its CI job covers. |
 | [golangci-lint](https://golangci-lint.run) v2.12.2 | The version CI pins.                                                                                               |
 
 ## Before you submit

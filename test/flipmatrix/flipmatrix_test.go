@@ -278,7 +278,7 @@ func flaggedBy(t *testing.T, migration string, major int, rule string) bool {
 
 	fsys := fstest.MapFS{"20240817120000_pattern.sql": &fstest.MapFile{Data: []byte(migration)}}
 
-	linted, err := mig.Lint(fsys, major)
+	linted, err := mig.Lint(fsys, major, nil)
 	if err != nil {
 		t.Fatalf("lint: %v", err)
 	}

@@ -42,9 +42,10 @@ mig deliberately does not do these:
 - Declarative schema diffing. Hand-written, ordered, reviewable SQL is the positioning.
 - Any database other than Postgres. The design leans on the Postgres catalog, its grammar, and its locking behavior at every layer.
 - Executing down migrations (see [Down migrations](#down-migrations)).
-- Lock and hazard linting. Planned for a later version, where it can emit fixes as steps into a runtime that already works.
 - ORM integration, schema DSLs, or migrations written in Go.
 - Parallel step execution.
+
+Lock and hazard linting was on this list, deferred to a later version so that it could emit its fixes as steps into a runtime that already worked. That version arrived: `mig lint` is built, and has its own document, [lint.md](lint.md).
 
 ## Architecture
 
@@ -66,12 +67,23 @@ internal/exec/       the executor loop
 internal/throttle/   adaptive backfill pacing
 internal/importer/   goose and golang-migrate adapters
 internal/crash/      fault injection points for the kill tests
+internal/lint/       the lock linter: lock model, rules, stats, fixes, policy, reports
+internal/lint/verify/ the chaos harness behind mig lint verify
 test/harness/        containers, template clone, subprocess control, TCP proxy
 test/kill/           recovery matrices, partition tests, seeded fuzz
 test/faultdb/        a database driver that fails on command
+test/lockmatrix/     the lock model held against a live server
+test/flipmatrix/     version-conditional rules across the supported majors
+test/autofix/        linter fixes held to the executor's schema fingerprint
+test/estimate/       duration estimates held against a real rewrite
+test/chaos/          the chaos harness against known-bad and known-good migrations
 ```
 
 The stack: `database/sql` over the pgx stdlib driver, `pg_query_go` for SQL parsing (the real Postgres grammar, never regex), cobra for the CLI, `log/slog` for logging, testcontainers for the test suite. No ORM, no `init()` side effects, no package-level mutable state. Every exported function takes `context.Context` first; errors are wrapped with `%w`.
+
+**Platforms.** The shipped code is portable and the test suite is not, and the split is deliberate. `internal/crash` is compiled into the binary rather than gated behind a build tag, because the tested binary has to be the one that ships, so ending a run abruptly is the one thing in the executor that has to be spelled per platform: `kill_unix.go` sends `SIGKILL`, `kill_windows.go` calls `TerminateProcess` through `os.Process.Kill` and then blocks, since that call is documented as asynchronous where the signal is not. Everything else compiles anywhere, and the CI job on `windows-latest` builds `./cmd/... ./internal/... ./pkg/...` and runs every package whose tests do not need a container.
+
+The container suite stays Linux. The kill matrices drive the migrator as a POSIX process group and use `SIGSTOP` and `SIGCONT`, which have no supported equivalent on Windows, and GitHub's Windows runners cannot run Linux containers. The Windows job therefore computes its package list by excluding anything that depends on `test/harness`, so a package that grows a container test later leaves that job on its own rather than breaking it. A change that claims more for Windows than the matrices cover is a change that overstates the guarantee.
 
 ## Migration format
 
@@ -84,6 +96,7 @@ Migrations are annotated SQL files, named `<version>_<name>.sql` with a zero-pad
 | `backfill: k=v ...`      | chunked resumable step; keys: `table`, `key`, `batch`, `max_lag_bytes` |
 | `satisfied: <predicate>` | override the inferred precondition                                     |
 | `no_lock_timeout`        | suppresses the default `lock_timeout`; must be explicit                |
+| `lint:ignore <rule> reason="<why>"` | silences one lint rule; read by `mig lint`, ignored by the executor |
 
 SQL before any `step:` annotation belongs to an implicit step. Multi-statement steps are permitted; all statements of a transactional step share one transaction. The [README](../README.md) documents the format from the user's side, including the full inference table.
 
@@ -249,10 +262,12 @@ The machine-readable summary goes to stdout on exit, and it is a contract, not a
 | `mig plan`                                | parse and print inferred predicates and step kinds; no database writes |
 | `mig import --from goose\|golang-migrate` | adopt an existing history (see [Adoption](#adoption))                  |
 | `mig fingerprint`                         | emit the canonical schema fingerprint, used by tests and drift checks  |
+| `mig lint`                                | report the locks each statement takes, and rewrite the ones that hurt  |
+| `mig lint verify`                         | apply the migrations under a workload and measure what they cost       |
 
 `verify` is the production startup path. The migrate-on-boot pattern is a trap: every replica races at startup, there is no leader election, and a slow migration collides with the readiness probe. The correct shape is apply as a separate job (`mig up`) and verify in the service binary: fail fast if migrations are pending, never apply them. `mig.Verify` exists to make that one line of code.
 
-Exit codes are part of the contract: 0 converged, 1 error, 3 pending, 4 lease held. Configuration comes from flags and environment variables; there is no config file.
+Exit codes are part of the contract: 0 converged, 1 error, 3 pending, 4 lease held. Configuration comes from flags and environment variables. The executor has no config file and will not get one; the linter has an optional policy file, `.miglint.yaml`, because a team's severity decisions belong in the repository rather than in every command line.
 
 ## Adoption
 

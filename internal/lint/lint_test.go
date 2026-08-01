@@ -29,6 +29,10 @@ import (
 	"testing/fstest"
 
 	"github.com/tochemey/mig/internal/lint"
+	"github.com/tochemey/mig/internal/lint/lockmodel"
+	"github.com/tochemey/mig/internal/lint/policy"
+	"github.com/tochemey/mig/internal/lint/rules"
+	"github.com/tochemey/mig/internal/lint/stats"
 	"github.com/tochemey/mig/internal/parse"
 	"github.com/tochemey/mig/internal/plan"
 )
@@ -67,10 +71,12 @@ func TestRunOrdersAndLocatesFindings(t *testing.T) {
 		"2_b.sql": &fstest.MapFile{Data: []byte(second)},
 	}
 
-	findings, sources, err := lint.Run(fsys, load(t, fsys), current, nil)
+	result, err := lint.Run(fsys, load(t, fsys), current, nil, nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
+
+	findings, sources := result.Findings, result.Sources
 
 	got := make([]string, 0, len(findings))
 
@@ -158,10 +164,12 @@ func TestRunLeavesRewrittenStatementsUnlocated(t *testing.T) {
 
 	fsys := fstest.MapFS{"1_fill.sql": &fstest.MapFile{Data: []byte(body)}}
 
-	findings, _, err := lint.Run(fsys, load(t, fsys), current, nil)
+	result, err := lint.Run(fsys, load(t, fsys), current, nil, nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
+
+	findings := result.Findings
 
 	if len(findings) != 0 {
 		t.Fatalf("a chunked backfill was flagged: %+v", findings)
@@ -184,10 +192,12 @@ func TestRunStripsFixesOnSharedSteps(t *testing.T) {
 		"2_alone.sql":  &fstest.MapFile{Data: []byte(alone)},
 	}
 
-	findings, _, err := lint.Run(fsys, load(t, fsys), current, nil)
+	result, err := lint.Run(fsys, load(t, fsys), current, nil, nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
+
+	findings := result.Findings
 
 	if len(findings) != 2 {
 		t.Fatalf("found %d findings, want 2: %+v", len(findings), findings)
@@ -223,7 +233,7 @@ func TestRunRejectsHandBuiltPlans(t *testing.T) {
 
 			fsys := fstest.MapFS{"x.sql": &fstest.MapFile{Data: []byte(tc.sql)}}
 
-			_, _, err := lint.Run(fsys, p, current, nil)
+			_, err := lint.Run(fsys, p, current, nil, nil)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("err = %v, want %q", err, tc.want)
 			}
@@ -233,9 +243,159 @@ func TestRunRejectsHandBuiltPlans(t *testing.T) {
 	t.Run("missing file", func(t *testing.T) {
 		p := &plan.Plan{Migrations: []plan.Migration{{File: "gone.sql"}}}
 
-		_, _, err := lint.Run(fstest.MapFS{}, p, current, nil)
+		_, err := lint.Run(fstest.MapFS{}, p, current, nil, nil)
 		if err == nil || !strings.Contains(err.Error(), "read migration") {
 			t.Errorf("err = %v, want a read failure", err)
 		}
 	})
+}
+
+// ruleIDs is what a comparison of findings reads.
+func ruleIDs(findings []rules.Finding) []string {
+	ids := make([]string, 0, len(findings))
+
+	for _, finding := range findings {
+		ids = append(ids, finding.RuleID)
+	}
+
+	return ids
+}
+
+// TestRunHonoursSuppressions covers the scope of a directive: it silences the
+// step it sits in, and a directive above the first step silences the file.
+func TestRunHonoursSuppressions(t *testing.T) {
+	cases := []struct {
+		name      string
+		directive string
+		want      []string
+	}{
+		{
+			name:      "no directive",
+			directive: "",
+			want:      []string{"L001", "L001"},
+		},
+		{
+			name:      "inside a step",
+			directive: "-- +mig step: one\n-- +mig lint:ignore L001 reason=\"twelve rows\"\n",
+			want:      []string{"L001"},
+		},
+		{
+			name:      "above the first step",
+			directive: "-- +mig lint:ignore L001 reason=\"twelve rows\"\n-- +mig step: one\n",
+			want:      nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opening := tc.directive
+			if opening == "" {
+				opening = "-- +mig step: one\n"
+			}
+
+			body := opening + "CREATE INDEX i ON t (c);\n\n" +
+				"-- +mig step: two\nCREATE INDEX j ON t (d);\n"
+
+			fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(body)}}
+
+			result, err := lint.Run(fsys, load(t, fsys), current, nil, nil)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+
+			if got := ruleIDs(result.Findings); strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Errorf("findings = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunMarksTheDirectivesThatSilencedSomething covers what the audit reads:
+// a directive that no longer suppresses anything is the one to look at.
+func TestRunMarksTheDirectivesThatSilencedSomething(t *testing.T) {
+	body := "-- +mig step: one\n" +
+		"-- +mig lint:ignore L001 reason=\"twelve rows\"\n" +
+		"-- +mig lint:ignore L010 reason=\"nothing here vacuums\"\n" +
+		"CREATE INDEX i ON t (c);\n"
+
+	fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(body)}}
+
+	result, err := lint.Run(fsys, load(t, fsys), current, nil, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(result.Suppressions) != 2 {
+		t.Fatalf("carried %d directives, want 2", len(result.Suppressions))
+	}
+
+	if !result.Suppressions[0].Used {
+		t.Error("the directive that silenced the index build reads as unused")
+	}
+
+	if result.Suppressions[1].Used {
+		t.Error("a directive that silenced nothing reads as used")
+	}
+}
+
+// TestRunReportsDirectivesItCannotHonour covers the design's rule that a
+// suppression without a reason is a lint error of its own: the finding it was
+// meant to silence stands, and the directive is reported beside it.
+func TestRunReportsDirectivesItCannotHonour(t *testing.T) {
+	body := "-- +mig step: one\n-- +mig lint:ignore L001\nCREATE INDEX i ON t (c);\n"
+
+	fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(body)}}
+
+	result, err := lint.Run(fsys, load(t, fsys), current, nil, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if got := ruleIDs(result.Findings); strings.Join(got, " ") != "L000 L001" {
+		t.Fatalf("findings = %v, want the directive's complaint and the finding it did not silence", got)
+	}
+
+	broken := result.Findings[0]
+
+	if broken.Severity != rules.SeverityError || !strings.Contains(broken.Message, "gives no reason") {
+		t.Errorf("the complaint reads %+v", broken)
+	}
+
+	if broken.Span.Line != 2 || broken.Step != "one" {
+		t.Errorf("the complaint is placed at line %d step %q", broken.Span.Line, broken.Step)
+	}
+}
+
+// TestRunAppliesThePolicy covers both halves of what a policy decides: the
+// severity a rule carries, and the sizes a size-dependent hazard is graded by.
+func TestRunAppliesThePolicy(t *testing.T) {
+	body := "-- +mig step: one\nCREATE INDEX i ON t (c);\n\n" +
+		"-- +mig step: two\nALTER TABLE t ALTER COLUMN c TYPE bigint;\n"
+
+	fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(body)}}
+
+	// A table of twenty thousand rows: a warning by the catalog's own
+	// thresholds, and an outage by the ones this policy sets.
+	snapshot := stats.Of(map[lockmodel.Relation]stats.Table{
+		{Name: "t"}: {Exists: true, Rows: 20_000, Bytes: 16 << 20},
+	})
+
+	pol, err := policy.Parse([]byte("rules:\n  L001: off\nthresholds:\n  big_rows: 10000\n"), "migrations")
+	if err != nil {
+		t.Fatalf("parse policy: %v", err)
+	}
+
+	result, err := lint.Run(fsys, load(t, fsys), current, snapshot, pol)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if got := ruleIDs(result.Findings); strings.Join(got, " ") != "L004" {
+		t.Fatalf("findings = %v, want the type change alone", got)
+	}
+
+	if result.Findings[0].Severity != rules.SeverityError {
+		t.Errorf("severity = %s, want the policy's threshold to make it an error",
+			result.Findings[0].Severity)
+	}
 }

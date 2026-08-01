@@ -26,6 +26,8 @@ package mig_test
 import (
 	"errors"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -55,7 +57,7 @@ VACUUM FULL users;
 func TestLintReportsHazards(t *testing.T) {
 	fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(hazardous)}}
 
-	linted, err := mig.Lint(fsys, mig.DefaultTargetVersion)
+	linted, err := mig.Lint(fsys, mig.DefaultTargetVersion, nil)
 	if err != nil {
 		t.Fatalf("lint: %v", err)
 	}
@@ -100,7 +102,7 @@ func TestLintConnectedGradesFindingsBySize(t *testing.T) {
 
 	fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(typeChange)}}
 
-	linted, err := mig.LintConnected(t.Context(), db, fsys)
+	linted, err := mig.LintConnected(t.Context(), db, fsys, nil)
 	if err != nil {
 		t.Fatalf("lint connected: %v", err)
 	}
@@ -145,7 +147,7 @@ func TestLintConnectedTakesTheVersionFromTheServer(t *testing.T) {
 
 	fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(addDefault)}}
 
-	linted, err := mig.LintConnected(t.Context(), db, fsys)
+	linted, err := mig.LintConnected(t.Context(), db, fsys, nil)
 	if err != nil {
 		t.Fatalf("lint connected: %v", err)
 	}
@@ -158,7 +160,7 @@ func TestLintConnectedTakesTheVersionFromTheServer(t *testing.T) {
 
 	// The same statement written for Postgres 10 rewrites the table, which is
 	// what the flag says and the server overrode.
-	offline, err := mig.Lint(fsys, 10)
+	offline, err := mig.Lint(fsys, 10, nil)
 	if err != nil {
 		t.Fatalf("lint: %v", err)
 	}
@@ -178,7 +180,7 @@ func TestLintConnectedFailsOnAClosedDatabase(t *testing.T) {
 
 	fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(hazardous)}}
 
-	if _, err := mig.LintConnected(t.Context(), db, fsys); err == nil {
+	if _, err := mig.LintConnected(t.Context(), db, fsys, nil); err == nil {
 		t.Error("linting reported success against a closed pool")
 	}
 }
@@ -188,13 +190,13 @@ func TestLintConnectedFailsOnAClosedDatabase(t *testing.T) {
 func TestLintConnectedRejectsAnEmptyDirectory(t *testing.T) {
 	db := newDatabase(t)
 
-	if _, err := mig.LintConnected(t.Context(), db, fstest.MapFS{}); err == nil {
+	if _, err := mig.LintConnected(t.Context(), db, fstest.MapFS{}, nil); err == nil {
 		t.Error("an empty directory linted clean")
 	}
 }
 
 func TestLintRejectsAnEmptyDirectory(t *testing.T) {
-	if _, err := mig.Lint(fstest.MapFS{}, mig.DefaultTargetVersion); err == nil {
+	if _, err := mig.Lint(fstest.MapFS{}, mig.DefaultTargetVersion, nil); err == nil {
 		t.Error("an empty directory linted clean")
 	}
 }
@@ -226,7 +228,50 @@ func TestLintReportsAVanishingFile(t *testing.T) {
 	// The loader reads the file once; the linter's second read fails.
 	fsys := &vanishingFS{inner: inner, name: "1_m.sql", limit: 1}
 
-	if _, err := mig.Lint(fsys, mig.DefaultTargetVersion); err == nil {
+	if _, err := mig.Lint(fsys, mig.DefaultTargetVersion, nil); err == nil {
 		t.Error("a vanishing migration linted clean")
+	}
+}
+
+// TestLintWithAPolicyAndASuppression covers the public surface V6 adds: a
+// policy file read from disk, and the directives the report carries back for
+// an audit.
+func TestLintWithAPolicyAndASuppression(t *testing.T) {
+	body := "-- +mig step: index\n" +
+		"-- +mig lint:ignore L001 reason=\"the table has twelve rows\"\n" +
+		"CREATE INDEX idx_users_email ON users (email);\n\n" +
+		"-- +mig step: compact\n-- +mig notx\nVACUUM FULL users;\n"
+
+	fsys := fstest.MapFS{"20240817120000_m.sql": &fstest.MapFile{Data: []byte(body)}}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, mig.PolicyFileName)
+
+	if err := os.WriteFile(path, []byte("rules:\n  L010: warn\n"), 0o600); err != nil {
+		t.Fatalf("write policy: %v", err)
+	}
+
+	pol, err := mig.LoadPolicy(path, dir)
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+
+	linted, err := mig.Lint(fsys, mig.DefaultTargetVersion, pol)
+	if err != nil {
+		t.Fatalf("lint: %v", err)
+	}
+
+	if len(linted.Findings) != 1 || linted.Findings[0].RuleID != rules.L010 {
+		t.Fatalf("found %+v, want the vacuum alone", linted.Findings)
+	}
+
+	// The policy downgraded it, so a run that would have failed now passes.
+	if linted.Errors() != 0 {
+		t.Errorf("Errors() = %d, want the policy's warning", linted.Errors())
+	}
+
+	if len(linted.Suppressions) != 1 || !linted.Suppressions[0].Used {
+		t.Errorf("suppressions = %+v, want the one that silenced the index build",
+			linted.Suppressions)
 	}
 }

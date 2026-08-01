@@ -51,39 +51,78 @@ import (
 // The rule IDs, spelled once here rather than at each rule and each test
 // that names one. They are stable and never reused.
 const (
-	L001 = "L001" // CREATE INDEX without CONCURRENTLY
-	L002 = "L002" // CONCURRENTLY inside a transactional step
-	L003 = "L003" // ADD COLUMN whose default rewrites the table
-	L004 = "L004" // ALTER COLUMN TYPE causing a rewrite
-	L005 = "L005" // SET NOT NULL without a proving validated CHECK
-	L006 = "L006" // ADD FOREIGN KEY without NOT VALID
-	L007 = "L007" // ADD CHECK without NOT VALID
-	L008 = "L008" // ADD PRIMARY KEY without USING INDEX
-	L009 = "L009" // inline UNIQUE in ADD COLUMN
-	L010 = "L010" // VACUUM FULL or CLUSTER in a migration
-	L011 = "L011" // REFRESH MATERIALIZED VIEW without CONCURRENTLY
+	// L000 is the linter's own: not a hazard in the schema, but a lint
+	// directive it cannot honour.
+	L000 = "L000"
 
-	L020 = "L020" // several ACCESS EXCLUSIVE statements in one transaction
-	L021 = "L021" // row work sharing a transaction with other DDL
-	L022 = "L022" // an index built before the backfill that fills it
-	L023 = "L023" // a foreign key added before the backfill that populates it
-	L024 = "L024" // an enum value used in the transaction that added it
-	L025 = "L025" // a blocking step with the lock timeout turned off
+	L001 = "L001"
+	L002 = "L002"
+	L003 = "L003"
+	L004 = "L004"
+	L005 = "L005"
+	L006 = "L006"
+	L007 = "L007"
+	L008 = "L008"
+	L009 = "L009"
+	L010 = "L010"
+	L011 = "L011"
 
-	L030 = "L030" // a column or table dropped out from under the application
-	L031 = "L031" // a table or column renamed, which no deploy order survives
-	L032 = "L032" // a table created and never granted to the application role
-	L033 = "L033" // TRUNCATE in a migration
-	L040 = "L040" // an UPDATE or DELETE over a whole table in one transaction
-	L041 = "L041" // a DELETE over a large table, for the bloat it leaves
-	L042 = "L042" // a concurrent index build reconciled by a hand-written predicate
+	L020 = "L020"
+	L021 = "L021"
+	L022 = "L022"
+	L023 = "L023"
+	L024 = "L024"
+	L025 = "L025"
+
+	L030 = "L030"
+	L031 = "L031"
+	L032 = "L032"
+	L033 = "L033"
+	L040 = "L040"
+	L041 = "L041"
+	L042 = "L042"
 )
+
+// descriptions says what each rule detects, in the words the catalog is read
+// by. It is the one place the catalog is spelled out: a code-scanning UI is
+// handed these, and a policy or a suppression naming a rule is checked
+// against them, so a typo protects nothing quietly.
+var descriptions = map[string]string{
+	L000: "a lint directive the linter cannot honour",
+
+	L001: "CREATE INDEX without CONCURRENTLY",
+	L002: "CONCURRENTLY inside a transactional step",
+	L003: "ADD COLUMN whose default rewrites the table",
+	L004: "ALTER COLUMN TYPE causing a rewrite",
+	L005: "SET NOT NULL without a proving validated CHECK",
+	L006: "ADD FOREIGN KEY without NOT VALID",
+	L007: "ADD CHECK without NOT VALID",
+	L008: "ADD PRIMARY KEY without USING INDEX",
+	L009: "inline UNIQUE in ADD COLUMN",
+	L010: "VACUUM FULL or CLUSTER in a migration",
+	L011: "REFRESH MATERIALIZED VIEW without CONCURRENTLY",
+
+	L020: "several ACCESS EXCLUSIVE statements in one transaction",
+	L021: "row work sharing a transaction with other DDL",
+	L022: "an index built before the backfill that fills it",
+	L023: "a foreign key added before the backfill that populates it",
+	L024: "an enum value used in the transaction that added it",
+	L025: "a blocking step with the lock timeout turned off",
+
+	L030: "a column or table dropped out from under the application",
+	L031: "a table or column renamed, which no deploy order survives",
+	L032: "a table created and never granted to the application role",
+	L033: "TRUNCATE in a migration",
+	L040: "an UPDATE or DELETE over a whole table in one transaction",
+	L041: "a DELETE over a large table, for the bloat it leaves",
+	L042: "a concurrent index build reconciled by a hand-written predicate",
+}
 
 // The sizes at which a size-dependent hazard changes grade. The upper pair is
 // the design's: a million rows or a gigabyte is where a rewrite stops being a
 // deploy and starts being an outage. The lower pair is this package's, and
 // exists so that the lookup tables every schema has do not train the reader
-// to ignore warnings.
+// to ignore warnings. A policy file may move all four.
 const (
 	bigRows    = 1_000_000
 	bigBytes   = 1 << 30
@@ -119,6 +158,46 @@ var (
 	}{{1 << 40, "TB"}, {1 << 30, "GB"}, {1 << 20, "MB"}, {1 << 10, "kB"}}
 )
 
+// Describe returns what a rule detects, and the empty string for an ID the
+// catalog does not have.
+func Describe(id string) string {
+	return descriptions[id]
+}
+
+// Thresholds are the sizes at which a hazard whose cost is the table's size
+// changes grade. A field left at zero takes this package's default, so a
+// policy naming one threshold does not silently reset the other three.
+type Thresholds struct {
+	// BigRows and BigBytes are where such a hazard becomes an error.
+	BigRows  int64
+	BigBytes int64
+
+	// SmallRows and SmallBytes are where it stops being worth a warning.
+	SmallRows  int64
+	SmallBytes int64
+}
+
+// resolve fills in every field the caller left at zero.
+func (t Thresholds) resolve() Thresholds {
+	if t.BigRows == 0 {
+		t.BigRows = bigRows
+	}
+
+	if t.BigBytes == 0 {
+		t.BigBytes = bigBytes
+	}
+
+	if t.SmallRows == 0 {
+		t.SmallRows = smallRows
+	}
+
+	if t.SmallBytes == 0 {
+		t.SmallBytes = smallBytes
+	}
+
+	return t
+}
+
 // Severity grades a finding.
 type Severity int
 
@@ -139,8 +218,9 @@ const (
 // nothing there knows, and a rule that needs the size does not fire at all.
 func large(ctx Context, schema, name string) bool {
 	table := ctx.Stats.Table(lockmodel.Relation{Schema: schema, Name: name})
+	limits := ctx.Thresholds.resolve()
 
-	return table.Exists && (table.Rows >= bigRows || table.Bytes >= bigBytes)
+	return table.Exists && (table.Rows >= limits.BigRows || table.Bytes >= limits.BigBytes)
 }
 
 // count renders a quantity with its noun, pluralised.
@@ -253,6 +333,11 @@ type Context struct {
 	// Step is the whole step this statement belongs to, for a rule about the
 	// shape of a transaction rather than about one statement.
 	Step Step
+
+	// Thresholds are the sizes a hazard whose cost is the table's size is
+	// graded by, which a policy file may move. The zero value is the
+	// package's own.
+	Thresholds Thresholds
 
 	// Stats is what the catalog said about the relations this plan names,
 	// and is nil offline. A hazard whose cost is the table's size is graded
@@ -430,10 +515,12 @@ func grade(ctx Context, relation lockmodel.Relation) Severity {
 		return SeverityWarn
 	}
 
+	limits := ctx.Thresholds.resolve()
+
 	switch {
-	case table.Rows >= bigRows || table.Bytes >= bigBytes:
+	case table.Rows >= limits.BigRows || table.Bytes >= limits.BigBytes:
 		return SeverityError
-	case table.Rows < smallRows && table.Bytes < smallBytes:
+	case table.Rows < limits.SmallRows && table.Bytes < limits.SmallBytes:
 		return SeverityInfo
 	default:
 		return SeverityWarn

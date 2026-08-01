@@ -30,6 +30,7 @@ import (
 	"io/fs"
 
 	"github.com/tochemey/mig/internal/lint"
+	"github.com/tochemey/mig/internal/lint/policy"
 	"github.com/tochemey/mig/internal/lint/rules"
 	"github.com/tochemey/mig/internal/lint/stats"
 	"github.com/tochemey/mig/internal/plan"
@@ -37,6 +38,17 @@ import (
 
 // Finding is one hazard the linter reports.
 type Finding = rules.Finding
+
+// Policy is what a team decided about the rule catalog: the severity each
+// rule carries, the sizes a size-dependent hazard is graded by, and the
+// target version. A nil *Policy is the absence of one.
+type Policy = policy.Policy
+
+// Suppression is one "-- +mig lint:ignore" directive a migration carries.
+type Suppression = policy.Directive
+
+// PolicyFileName is the policy file's conventional name.
+const PolicyFileName = policy.FileName
 
 // Severity levels a linted migration's findings carry.
 const (
@@ -57,6 +69,12 @@ type LintReport struct {
 	// Sources maps each linted file to its contents, which is what a
 	// renderer needs to show the offending line.
 	Sources map[string]string
+
+	// Suppressions is every lint directive the migrations carry, each marked
+	// with whether it silenced anything on this run. It is what an audit of
+	// them reads: a suppression that no longer suppresses is one nobody has
+	// looked at since it was written.
+	Suppressions []Suppression
 
 	// Uncalibrated is what went wrong while measuring the server, empty when
 	// nothing did. Measuring needs a write, which a read-only standby will
@@ -79,35 +97,42 @@ func (r *LintReport) Errors() int {
 	return count
 }
 
+// LoadPolicy reads a policy file and resolves it for the migration directory
+// being linted, which is what its per-directory overrides are keyed by.
+func LoadPolicy(path, dir string) (*Policy, error) {
+	return policy.Load(path, dir)
+}
+
 // Lint checks every migration in fsys against the offline rule catalog,
 // without connecting to anything. The target version decides
-// version-sensitive behaviour, such as whether an added default rewrites.
+// version-sensitive behaviour, such as whether an added default rewrites, and
+// the policy may be nil.
 //
 // Offline, nothing here knows how large any table is, so every hazard whose
 // cost is the table's size stays a warning. [LintConnected] is the same
 // catalog with those sizes in hand.
-func Lint(fsys fs.FS, targetVersion int) (*LintReport, error) {
+func Lint(fsys fs.FS, targetVersion int, pol *Policy) (*LintReport, error) {
 	loaded, err := plan.LoadFS(fsys)
 	if err != nil {
 		return nil, err
 	}
 
-	findings, sources, err := lint.Run(fsys, loaded, targetVersion, nil)
+	result, err := lint.Run(fsys, loaded, targetVersion, nil, pol)
 	if err != nil {
 		return nil, err
 	}
 
-	return &LintReport{Findings: findings, Sources: sources}, nil
+	return reportOf(result, ""), nil
 }
 
 // LintConnected checks every migration with the live catalog in reach.
 //
-// The target version is the server's own, the severity of a size-dependent
-// hazard is the size of the table it names, and each such finding carries an
-// estimate of how long the work will hold its lock. Nothing is written: the
-// catalog is read, and the calibration probe builds a temporary table that
-// leaves with the session.
-func LintConnected(ctx context.Context, db *sql.DB, fsys fs.FS) (*LintReport, error) {
+// The target version is the server's own, whatever the policy says, the
+// severity of a size-dependent hazard is the size of the table it names, and
+// each such finding carries an estimate of how long the work will hold its
+// lock. Nothing is written: the catalog is read, and the calibration probe
+// builds a table it rolls back.
+func LintConnected(ctx context.Context, db *sql.DB, fsys fs.FS, pol *Policy) (*LintReport, error) {
 	loaded, err := plan.LoadFS(fsys)
 	if err != nil {
 		return nil, err
@@ -133,12 +158,22 @@ func LintConnected(ctx context.Context, db *sql.DB, fsys fs.FS) (*LintReport, er
 		uncalibrated = err.Error()
 	}
 
-	findings, sources, err := lint.Run(fsys, loaded, major, snapshot)
+	result, err := lint.Run(fsys, loaded, major, snapshot, pol)
 	if err != nil {
 		return nil, err
 	}
 
-	return &LintReport{Findings: findings, Sources: sources, Uncalibrated: uncalibrated}, nil
+	return reportOf(result, uncalibrated), nil
+}
+
+// reportOf is the public shape of what the engine produced.
+func reportOf(result *lint.Result, uncalibrated string) *LintReport {
+	return &LintReport{
+		Findings:     result.Findings,
+		Sources:      result.Sources,
+		Suppressions: result.Suppressions,
+		Uncalibrated: uncalibrated,
+	}
 }
 
 // calibrate measures the server and hangs the result on the snapshot,

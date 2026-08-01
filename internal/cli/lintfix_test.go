@@ -360,6 +360,16 @@ func TestLintFixRefusesAFormat(t *testing.T) {
 	}
 }
 
+func TestLintFixRefusesTheSuppressionAudit(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "20240817120000_fk.sql", unsafeMigration)
+
+	_, err := runFix(t, "", "lint", "--dir", dir, "--fix", "--report-suppressions")
+	if err == nil || !strings.Contains(err.Error(), "reports no suppressions") {
+		t.Fatalf("err = %v, want the audit refusal", err)
+	}
+}
+
 func TestLintFixReportsAMissingDirectory(t *testing.T) {
 	if _, err := runFix(t, "", "lint", "--dir", "/does/not/exist", "--fix", "--yes"); err == nil {
 		t.Fatal("a missing directory fixed clean")

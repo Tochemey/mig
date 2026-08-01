@@ -128,7 +128,7 @@ func fixOf(t *testing.T, unsafe string) string {
 
 	fsys := fstest.MapFS{"20240817120000_case.sql": &fstest.MapFile{Data: []byte(unsafe)}}
 
-	linted, err := mig.Lint(fsys, mig.DefaultTargetVersion)
+	linted, err := mig.Lint(fsys, mig.DefaultTargetVersion, nil)
 	if err != nil {
 		t.Fatalf("lint the unsafe migration: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestFixedMigrationsConvergeToTheSameSchema(t *testing.T) {
 			// linter is recommending statements it would then flag.
 			fsys := fstest.MapFS{"20240817120000_case.sql": &fstest.MapFile{Data: []byte(fixed)}}
 
-			relinted, err := mig.Lint(fsys, mig.DefaultTargetVersion)
+			relinted, err := mig.Lint(fsys, mig.DefaultTargetVersion, nil)
 			if err != nil {
 				t.Fatalf("lint the fixed migration: %v", err)
 			}
