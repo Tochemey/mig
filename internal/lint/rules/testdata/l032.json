@@ -1,0 +1,16 @@
+{
+  "findings": [
+    {
+      "rule": "L032",
+      "severity": "warn",
+      "message": "nothing in this migration grants access to audit. A table created by the migration role is invisible to a restricted application role, and the failure surfaces in production rather than in CI",
+      "file": "1_l032.sql",
+      "step": "flagged",
+      "span": {
+        "start": 362,
+        "end": 415,
+        "line": 14
+      }
+    }
+  ]
+}

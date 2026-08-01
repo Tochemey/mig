@@ -44,6 +44,19 @@
       },
       "fix": "-- TODO: writes landing between the backfill and the swap are lost unless the application dual-writes both columns or traffic pauses; decide that, then run these steps\n-- The steps below are a plan, not a migration; uncomment them once the\n-- TODO above is resolved.\n--\n-- -- +mig step: add_cache_v__new\n-- -- the new column arrives empty beside the old one\n-- ALTER TABLE cache ADD COLUMN v__new bigint;\n\n-- -- +mig step: backfill_cache_v__new\n-- -- +mig backfill: table=cache key=id batch=5000\n-- -- +mig satisfied: sql(SELECT NOT EXISTS (SELECT 1 FROM cache WHERE v__new IS NULL))\n-- -- rows where v is NULL stay NULL; adjust the predicate if the column is nullable. key=id is assumed, point it at the primary key if that is not right\n-- UPDATE cache SET v__new = v::bigint WHERE id \u003e :cursor_lo AND id \u003c= :cursor_hi AND v__new IS NULL;\n\n-- -- +mig step: swap_cache_v\n-- -- one transaction: the old column leaves, the new one takes its name\n-- ALTER TABLE cache DROP v;\n-- ALTER TABLE cache RENAME COLUMN v__new TO v;\n",
       "fix_scaffold": true
+    },
+    {
+      "rule": "L030",
+      "severity": "warn",
+      "message": "dropping cache: any code still reading it fails the moment this commits, and the rows do not come back. Ship the release that stops referencing it first",
+      "detail": "ACCESS EXCLUSIVE on cache, held for catalog work only; blocks reads and writes",
+      "file": "1_l004.sql",
+      "step": "drop_cache",
+      "span": {
+        "start": 520,
+        "end": 536,
+        "line": 20
+      }
     }
   ]
 }

@@ -431,7 +431,22 @@ func (e *Executor) beginAttempt(ctx context.Context, key ledger.StepKey) (int, e
 func (e *Executor) apply(ctx context.Context, key ledger.StepKey, work step.NoTxStep, conn *sql.Conn) error {
 	crash.At(crash.BeforeApply)
 
+	attempt := 0
+
 	run := func(ctx context.Context) error {
+		attempt++
+
+		// Every attempt after the first starts by clearing what the last one
+		// left. A CREATE INDEX CONCURRENTLY cancelled by the lock timeout
+		// leaves an invalid index behind, and running it again unrepaired
+		// finds its own leftovers rather than a clean table: the retry fails
+		// with "already exists" and the step never converges.
+		if attempt > 1 {
+			if err := work.Repair(ctx, conn); err != nil {
+				return fmt.Errorf("repair before retrying step %s: %w", key, err)
+			}
+		}
+
 		return work.Apply(ctx, conn)
 	}
 

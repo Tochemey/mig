@@ -1,0 +1,43 @@
+{
+  "findings": [
+    {
+      "rule": "L030",
+      "severity": "warn",
+      "message": "dropping users.legacy_email: any code still reading it fails the moment this commits, and the values do not come back. Ship the release that stops referencing it first",
+      "detail": "ACCESS EXCLUSIVE on users, held for catalog work only; blocks reads and writes",
+      "file": "1_l030.sql",
+      "step": "flagged_column",
+      "span": {
+        "start": 29,
+        "end": 71,
+        "line": 2
+      }
+    },
+    {
+      "rule": "L030",
+      "severity": "warn",
+      "message": "dropping sessions: any code still reading it fails the moment this commits, and the rows do not come back. Ship the release that stops referencing it first",
+      "detail": "ACCESS EXCLUSIVE on sessions, held for catalog work only; blocks reads and writes",
+      "file": "1_l030.sql",
+      "step": "flagged_table",
+      "span": {
+        "start": 102,
+        "end": 121,
+        "line": 5
+      }
+    },
+    {
+      "rule": "L030",
+      "severity": "warn",
+      "message": "dropping ops.audit_log: any code still reading it fails the moment this commits, and the rows do not come back. Ship the release that stops referencing it first",
+      "detail": "ACCESS EXCLUSIVE on ops.audit_log, held for catalog work only; blocks reads and writes",
+      "file": "1_l030.sql",
+      "step": "flagged_qualified_table",
+      "span": {
+        "start": 162,
+        "end": 186,
+        "line": 8
+      }
+    }
+  ]
+}

@@ -9,3 +9,6 @@ CREATE TABLE audit (id int);
 
 -- +mig step: check_on_new_table_is_fine
 ALTER TABLE audit ADD CONSTRAINT audit_id_positive CHECK (id > 0);
+
+-- +mig step: grant_audit
+GRANT SELECT ON audit TO application;

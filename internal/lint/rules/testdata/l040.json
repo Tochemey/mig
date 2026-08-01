@@ -1,0 +1,30 @@
+{
+  "findings": [
+    {
+      "rule": "L040",
+      "severity": "warn",
+      "message": "UPDATE over every row of users in one transaction: the locks are held to the end and a failure part-way rolls all of it back. Make it a backfill step, which commits and checkpoints as it goes",
+      "detail": "ROW EXCLUSIVE on users, held for a full scan; blocks no traffic",
+      "file": "1_l040.sql",
+      "step": "flagged_update",
+      "span": {
+        "start": 29,
+        "end": 63,
+        "line": 2
+      }
+    },
+    {
+      "rule": "L040",
+      "severity": "warn",
+      "message": "DELETE over every row of sessions in one transaction: the locks are held to the end and a failure part-way rolls all of it back. Make it a backfill step, which commits and checkpoints as it goes",
+      "detail": "ROW EXCLUSIVE on sessions, held for a full scan; blocks no traffic",
+      "file": "1_l040.sql",
+      "step": "flagged_delete",
+      "span": {
+        "start": 95,
+        "end": 115,
+        "line": 5
+      }
+    }
+  ]
+}

@@ -217,6 +217,20 @@ func constraintTwoStep(rel *pgquery.RangeVar, con *pgquery.Constraint, add, vali
 	}}
 }
 
+// WithoutSatisfied is the step again, minus the predicate its author wrote.
+//
+// It is a fix by subtraction: the executor infers a predicate for every
+// statement it knows, and for a concurrent index build the inferred one is
+// the only place the invalid-index case is handled.
+func WithoutSatisfied(name string, notx bool, stmt *pgquery.Node) *Fix {
+	return &Fix{Steps: []Step{{
+		Name:    name,
+		Comment: "the executor infers the predicate, and its version knows an interrupted build leaves an invalid index",
+		NoTx:    notx,
+		Stmts:   []*pgquery.Node{dup(stmt)},
+	}}}
+}
+
 // PrimaryKeyViaIndex replaces ADD PRIMARY KEY with a concurrent unique index
 // build and an adoption, so the index build happens off the ACCESS EXCLUSIVE
 // path.

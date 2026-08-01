@@ -349,8 +349,8 @@ func TestCatalogueIDs(t *testing.T) {
 		previous = id
 	}
 
-	if len(seen) != 17 {
-		t.Errorf("catalog has %d rules, want 17", len(seen))
+	if len(seen) != 24 {
+		t.Errorf("catalog has %d rules, want 24", len(seen))
 	}
 }
 

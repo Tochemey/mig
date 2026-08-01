@@ -89,6 +89,17 @@ var cases = []fixCase{
 			"ALTER TABLE accounts ADD CONSTRAINT accounts_score_positive CHECK (score > 0);\n",
 	},
 	{
+		name: "concurrent_index_reconciled_by_hand",
+		seed: []string{
+			"CREATE TABLE accounts (id int, name text)",
+			"INSERT INTO accounts SELECT g, 'u' || g FROM generate_series(1, 200) g",
+		},
+		unsafe: "-- +mig step: index_name\n" +
+			"-- +mig notx\n" +
+			"-- +mig satisfied: sql(SELECT to_regclass('idx_accounts_name') IS NOT NULL)\n" +
+			"CREATE INDEX CONCURRENTLY idx_accounts_name ON accounts (name);\n",
+	},
+	{
 		name: "add_primary_key",
 		seed: []string{
 			"CREATE TABLE accounts (id int, name text)",

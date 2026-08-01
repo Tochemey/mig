@@ -35,6 +35,10 @@ import (
 // compile error instead of a rule that quietly stops matching.
 var constNode = (&pgquery.A_Const{}).ProtoReflect().Descriptor().FullName()
 
+// stringNode is the message an identifier part is carried in, named the same
+// way and for the same reason.
+var stringNode = (&pgquery.String{}).ProtoReflect().Descriptor().FullName()
+
 // l024 flags an enum value used in the transaction that added it.
 //
 // Postgres refuses it: the new label is not visible to the transaction that
@@ -80,6 +84,30 @@ func mentions(stmt *pgquery.RawStmt, label string) bool {
 		}
 
 		if literal := message.Interface().(*pgquery.A_Const); literal.GetSval().GetSval() == label {
+			found = true
+		}
+	})
+
+	return found
+}
+
+// mentionsIdent reports whether the SQL names the identifier anywhere in its
+// tree, which is how a predicate is read for the column it should have
+// consulted. The statement is parsed rather than searched as text: a name in
+// a comment or inside a literal is not a reference to it.
+func mentionsIdent(sql, name string) bool {
+	found := false
+
+	// A predicate the loader accepted parses; one it did not is not this
+	// rule's finding, and an empty tree mentions nothing.
+	tree, _ := pgquery.Parse(sql)
+
+	walk(tree.ProtoReflect(), func(message protoreflect.Message) {
+		if message.Descriptor().FullName() != stringNode {
+			return
+		}
+
+		if text, ok := message.Interface().(*pgquery.String); ok && text.GetSval() == name {
 			found = true
 		}
 	})

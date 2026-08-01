@@ -91,6 +91,8 @@ func newLintCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&fix, "fix", false, "rewrite flagged statements as safe steps, after showing the diff")
 	cmd.Flags().BoolVar(&yes, "yes", false, "apply fixes without asking, for CI")
 
+	cmd.AddCommand(newLintVerifyCommand())
+
 	return cmd
 }
 

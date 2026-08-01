@@ -69,6 +69,14 @@ const (
 	L023 = "L023" // a foreign key added before the backfill that populates it
 	L024 = "L024" // an enum value used in the transaction that added it
 	L025 = "L025" // a blocking step with the lock timeout turned off
+
+	L030 = "L030" // a column or table dropped out from under the application
+	L031 = "L031" // a table or column renamed, which no deploy order survives
+	L032 = "L032" // a table created and never granted to the application role
+	L033 = "L033" // TRUNCATE in a migration
+	L040 = "L040" // an UPDATE or DELETE over a whole table in one transaction
+	L041 = "L041" // a DELETE over a large table, for the bloat it leaves
+	L042 = "L042" // a concurrent index build reconciled by a hand-written predicate
 )
 
 // The sizes at which a size-dependent hazard changes grade. The upper pair is
@@ -125,6 +133,15 @@ const (
 	// SeverityError marks a hazard that is wrong regardless of scale.
 	SeverityError
 )
+
+// large reports whether the catalog says the table is big enough for a
+// hazard that only matters at size. Offline it is never large, because
+// nothing there knows, and a rule that needs the size does not fire at all.
+func large(ctx Context, schema, name string) bool {
+	table := ctx.Stats.Table(lockmodel.Relation{Schema: schema, Name: name})
+
+	return table.Exists && (table.Rows >= bigRows || table.Bytes >= bigBytes)
+}
 
 // count renders a quantity with its noun, pluralised.
 func count(n int, noun string) string {
@@ -256,6 +273,7 @@ func All() []Rule {
 		l001{}, l002{}, l003{}, l004{}, l005{}, l006{},
 		l007{}, l008{}, l009{}, l010{}, l011{},
 		l020{}, l021{}, l022{}, l023{}, l024{}, l025{},
+		l030{}, l031{}, l032{}, l033{}, l040{}, l041{}, l042{},
 	}
 }
 

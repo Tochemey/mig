@@ -9,3 +9,6 @@ CREATE TABLE audit (user_id bigint);
 
 -- +mig step: key_on_new_table_is_fine
 ALTER TABLE audit ADD CONSTRAINT audit_user_fk FOREIGN KEY (user_id) REFERENCES users (id);
+
+-- +mig step: grant_audit
+GRANT SELECT ON audit TO application;

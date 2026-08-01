@@ -1,0 +1,17 @@
+{
+  "findings": [
+    {
+      "rule": "L033",
+      "severity": "error",
+      "message": "TRUNCATE empties sessions under ACCESS EXCLUSIVE, and rolling the migration back does not bring the rows back. Emptying a table is a data change, not a schema change",
+      "detail": "ACCESS EXCLUSIVE on sessions, held for catalog work only; blocks reads and writes",
+      "file": "1_l033.sql",
+      "step": "flagged",
+      "span": {
+        "start": 22,
+        "end": 39,
+        "line": 2
+      }
+    }
+  ]
+}

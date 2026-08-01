@@ -21,3 +21,6 @@ ALTER TABLE users ADD COLUMN seq bigserial;
 
 -- +mig step: identity_has_no_simple_fix
 ALTER TABLE users ADD COLUMN n bigint GENERATED ALWAYS AS IDENTITY;
+
+-- +mig step: grant_audit
+GRANT SELECT ON audit TO application;

@@ -21,3 +21,12 @@ DROP TABLE cache;
 
 -- +mig step: recreate_cache
 CREATE TABLE cache (v bigint);
+
+-- +mig step: grant_audit
+GRANT SELECT ON audit TO application;
+
+-- +mig step: grant_app_audit2
+GRANT SELECT ON app.audit2 TO application;
+
+-- +mig step: grant_cache
+GRANT SELECT ON cache TO application;

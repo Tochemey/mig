@@ -39,3 +39,6 @@ ALTER TABLE users ADD COLUMN flag boolean, ALTER COLUMN flag2 SET NOT NULL;
 
 -- +mig step: unrelated_constraint_kind
 ALTER TABLE payments ADD CONSTRAINT payments_uq UNIQUE (ref);
+
+-- +mig step: grant_audit
+GRANT SELECT ON audit TO application;

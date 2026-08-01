@@ -35,11 +35,10 @@ import (
 // l025 flags a step that turns the lock timeout off while taking a lock
 // strong enough to queue traffic behind it.
 //
-// The timeout is the difference between a statement that gives up and one
-// that takes the site down. Postgres grants locks in order: a statement
-// waiting for ACCESS EXCLUSIVE puts every later reader behind it, so the wait
-// itself is the outage, and it lasts as long as whatever is already holding
-// the table. Without a timeout, that is unbounded.
+// Postgres grants locks in order, so a statement waiting for ACCESS EXCLUSIVE
+// puts every later reader behind it: the wait itself is the outage, and it
+// lasts as long as whatever is already holding the table. The timeout bounds
+// it. Without one, nothing does.
 type l025 struct{}
 
 func (l025) ID() string { return L025 }

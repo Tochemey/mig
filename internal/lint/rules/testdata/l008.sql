@@ -12,3 +12,6 @@ CREATE TABLE audit (id int);
 
 -- +mig step: key_on_new_table_is_fine
 ALTER TABLE audit ADD CONSTRAINT audit_pk PRIMARY KEY (id);
+
+-- +mig step: grant_audit
+GRANT SELECT ON audit TO application;

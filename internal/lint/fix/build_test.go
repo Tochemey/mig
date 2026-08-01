@@ -179,6 +179,22 @@ func TestCheckTwoStep(t *testing.T) {
 	}
 }
 
+func TestWithoutSatisfied(t *testing.T) {
+	built := stmt(t, "CREATE INDEX CONCURRENTLY idx_users_email ON users (email)")
+
+	got := render(t, WithoutSatisfied("index_email", true, built))
+
+	contains(t, got, []string{
+		"-- +mig step: index_email\n",
+		"-- +mig notx\n",
+		"CREATE INDEX CONCURRENTLY idx_users_email ON users USING btree (email);\n",
+	})
+
+	if strings.Contains(got, "satisfied") {
+		t.Errorf("the predicate the fix exists to drop came back:\n%s", got)
+	}
+}
+
 func TestPrimaryKeyViaIndex(t *testing.T) {
 	rel, cmd := alterOf(t, "ALTER TABLE users ADD CONSTRAINT users_pk PRIMARY KEY (id, org)")
 
