@@ -11,6 +11,7 @@
   <a href="https://github.com/Tochemey/mig/actions/workflows/build.yml"><img alt="build" src="https://img.shields.io/github/actions/workflow/status/Tochemey/mig/build.yml?branch=main&label=build"></a>
   <a href="https://codecov.io/gh/Tochemey/mig"><img alt="codecov" src="https://img.shields.io/codecov/c/github/Tochemey/mig/main"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/github/license/Tochemey/mig"></a>
+  <a href="https://human-oss.dev"><img src="https://human-oss.dev/badge.svg" alt="Open Source AI Manifesto" /></a>
 </p>
 
 Kill a migration part way through, by SIGKILL, a pod eviction or a lost node, and the fix is to run it again. Before each step, mig asks Postgres whether the work is already there instead of trusting its own record of what ran, so the next run picks up from what the database actually holds and finishes the job.
