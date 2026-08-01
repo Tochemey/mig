@@ -36,6 +36,12 @@ import (
 	"github.com/tochemey/mig/pkg/mig"
 )
 
+// The answers --fix takes for yes. Anything else leaves the files alone.
+const (
+	answerY   = "y"
+	answerYes = "yes"
+)
+
 // edit is one replacement inside a file, by byte range.
 type edit struct {
 	start, end int
@@ -289,5 +295,5 @@ func confirmed(stdin io.Reader) bool {
 
 	answer := strings.ToLower(strings.TrimSpace(scanner.Text()))
 
-	return answer == "y" || answer == "yes"
+	return answer == answerY || answer == answerYes
 }

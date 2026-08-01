@@ -25,6 +25,8 @@ package rules
 
 import (
 	pgquery "github.com/pganalyze/pg_query_go/v6"
+
+	"github.com/tochemey/mig/internal/lint/lockmodel"
 )
 
 // l010 flags VACUUM FULL and CLUSTER, which rewrite the table under ACCESS
@@ -32,7 +34,7 @@ import (
 // does not soften for tables created here.
 type l010 struct{}
 
-func (l010) ID() string { return "L010" }
+func (l010) ID() string { return L010 }
 
 func (l010) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 	if stmt.GetStmt().GetClusterStmt() != nil {
@@ -47,7 +49,7 @@ func (l010) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 	}
 
 	for _, option := range vacuum.GetOptions() {
-		if option.GetDefElem().GetDefname() == "full" {
+		if option.GetDefElem().GetDefname() == lockmodel.OptionFull {
 			return finding(SeverityError,
 				"VACUUM FULL rewrites the table under ACCESS EXCLUSIVE and belongs in a "+
 					"maintenance window, not a migration", ctx)

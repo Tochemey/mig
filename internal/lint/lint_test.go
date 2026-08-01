@@ -52,7 +52,10 @@ func load(t *testing.T, fsys fstest.MapFS) *plan.Plan {
 // sorted by file, position and rule, spans pointing at the statement text,
 // and every linted file's contents handed back for rendering.
 func TestRunOrdersAndLocatesFindings(t *testing.T) {
-	first := "-- +mig step: one\nCREATE INDEX i ON t (c);\n"
+	// Two statements one file apart pin the position tiebreak; the second
+	// trips a different rule, so rule order cannot stand in for it.
+	first := "-- +mig step: one\nCREATE INDEX i ON t (c);\n\n" +
+		"-- +mig step: compact\n-- +mig notx\nVACUUM FULL t;\n"
 
 	// One statement tripping two rules pins the rule-id tiebreak on an
 	// identical span.
@@ -64,7 +67,7 @@ func TestRunOrdersAndLocatesFindings(t *testing.T) {
 		"2_b.sql": &fstest.MapFile{Data: []byte(second)},
 	}
 
-	findings, sources, err := lint.Run(fsys, load(t, fsys), current)
+	findings, sources, err := lint.Run(fsys, load(t, fsys), current, nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -75,7 +78,7 @@ func TestRunOrdersAndLocatesFindings(t *testing.T) {
 		got = append(got, f.File+"/"+f.RuleID)
 	}
 
-	want := []string{"1_a.sql/L001", "2_b.sql/L003", "2_b.sql/L009"}
+	want := []string{"1_a.sql/L001", "1_a.sql/L010", "2_b.sql/L003", "2_b.sql/L009"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("findings = %v, want %v", got, want)
 	}
@@ -97,8 +100,50 @@ func TestRunOrdersAndLocatesFindings(t *testing.T) {
 		t.Errorf("span covers %q, not the statement", text)
 	}
 
-	if findings[1].Span != findings[2].Span {
+	if findings[2].Span != findings[3].Span {
 		t.Error("two findings on one statement should share its span")
+	}
+}
+
+// TestRelationsNamesEveryTableOnce covers what connected mode reads the
+// catalog about: every relation the statements touch, the implicit ones
+// included, each named once however often it appears.
+func TestRelationsNamesEveryTableOnce(t *testing.T) {
+	body := "-- +mig step: one\nCREATE INDEX i ON users (email);\n\n" +
+		"-- +mig step: two\n" +
+		"ALTER TABLE orders ADD CONSTRAINT orders_fk FOREIGN KEY (uid) REFERENCES users (id);\n\n" +
+		"-- +mig step: three\nALTER TABLE app.orders ADD COLUMN note text;\n"
+
+	fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(body)}}
+
+	relations, err := lint.Relations(load(t, fsys), current)
+	if err != nil {
+		t.Fatalf("relations: %v", err)
+	}
+
+	got := make([]string, 0, len(relations))
+	for _, relation := range relations {
+		got = append(got, relation.String())
+	}
+
+	// users arrives from the index and again as the key's referenced side,
+	// and is listed once; orders qualified is not orders bare.
+	want := "users orders app.orders"
+	if strings.Join(got, " ") != want {
+		t.Errorf("relations = %v, want %s", got, want)
+	}
+}
+
+// TestRelationsRejectsHandBuiltPlans covers the parse failure, which only a
+// plan that did not come from the loader can produce.
+func TestRelationsRejectsHandBuiltPlans(t *testing.T) {
+	p := &plan.Plan{Migrations: []plan.Migration{{
+		File:  "x.sql",
+		Steps: []plan.Step{{Name: "s", Statements: []parse.Statement{{SQL: "NOT SQL"}}}},
+	}}}
+
+	if _, err := lint.Relations(p, current); err == nil {
+		t.Error("an unparsable statement named relations")
 	}
 }
 
@@ -113,7 +158,7 @@ func TestRunLeavesRewrittenStatementsUnlocated(t *testing.T) {
 
 	fsys := fstest.MapFS{"1_fill.sql": &fstest.MapFile{Data: []byte(body)}}
 
-	findings, _, err := lint.Run(fsys, load(t, fsys), current)
+	findings, _, err := lint.Run(fsys, load(t, fsys), current, nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -139,7 +184,7 @@ func TestRunStripsFixesOnSharedSteps(t *testing.T) {
 		"2_alone.sql":  &fstest.MapFile{Data: []byte(alone)},
 	}
 
-	findings, _, err := lint.Run(fsys, load(t, fsys), current)
+	findings, _, err := lint.Run(fsys, load(t, fsys), current, nil)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -178,7 +223,7 @@ func TestRunRejectsHandBuiltPlans(t *testing.T) {
 
 			fsys := fstest.MapFS{"x.sql": &fstest.MapFile{Data: []byte(tc.sql)}}
 
-			_, _, err := lint.Run(fsys, p, current)
+			_, _, err := lint.Run(fsys, p, current, nil)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("err = %v, want %q", err, tc.want)
 			}
@@ -188,7 +233,7 @@ func TestRunRejectsHandBuiltPlans(t *testing.T) {
 	t.Run("missing file", func(t *testing.T) {
 		p := &plan.Plan{Migrations: []plan.Migration{{File: "gone.sql"}}}
 
-		_, _, err := lint.Run(fstest.MapFS{}, p, current)
+		_, _, err := lint.Run(fstest.MapFS{}, p, current, nil)
 		if err == nil || !strings.Contains(err.Error(), "read migration") {
 			t.Errorf("err = %v, want a read failure", err)
 		}

@@ -64,6 +64,10 @@ func Human(w io.Writer, findings []rules.Finding, sources map[string]string) err
 			_, _ = fmt.Fprintf(out, "    %s\n", f.Detail)
 		}
 
+		if f.Estimate != "" {
+			_, _ = fmt.Fprintf(out, "    %s\n", f.Estimate)
+		}
+
 		if f.Fix != "" {
 			_, _ = fmt.Fprintln(out, "    a rewrite is available: mig lint --fix")
 		}

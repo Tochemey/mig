@@ -38,6 +38,9 @@ import (
 	"github.com/tochemey/mig/test/harness"
 )
 
+// seedRows is enough rows for a backfill fixture to take more than one batch.
+const seedRows = 5
+
 // embedded is the shape a service ships: migrations compiled into the binary,
 // checked at startup, with no directory alongside it.
 //
@@ -54,9 +57,6 @@ func TestMain(m *testing.M) {
 		return nil
 	}))
 }
-
-// seedRows is enough rows for a backfill fixture to take more than one batch.
-const seedRows = 5
 
 // migrations returns the embedded directory rooted where the files are.
 func migrations(t *testing.T) fs.FS {

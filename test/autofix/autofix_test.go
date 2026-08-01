@@ -39,17 +39,6 @@ import (
 	"github.com/tochemey/mig/test/harness"
 )
 
-// shared is the container for this package, or nil when docker is absent.
-var shared *harness.Harness
-
-// TestMain brings up one container for the package.
-func TestMain(m *testing.M) {
-	os.Exit(harness.Main(m, 0, func(_ context.Context, h *harness.Harness) error {
-		shared = h
-		return nil
-	}))
-}
-
 // fixCase is one unsafe migration and the world it runs against.
 type fixCase struct {
 	name   string
@@ -91,6 +80,15 @@ var cases = []fixCase{
 			"FOREIGN KEY (uid) REFERENCES accounts (id);\n",
 	},
 	{
+		name: "add_check",
+		seed: []string{
+			"CREATE TABLE accounts (id int, score int)",
+			"INSERT INTO accounts SELECT g, g FROM generate_series(1, 200) g",
+		},
+		unsafe: "-- +mig step: add_check\n" +
+			"ALTER TABLE accounts ADD CONSTRAINT accounts_score_positive CHECK (score > 0);\n",
+	},
+	{
 		name: "add_primary_key",
 		seed: []string{
 			"CREATE TABLE accounts (id int, name text)",
@@ -99,6 +97,17 @@ var cases = []fixCase{
 		unsafe: "-- +mig step: add_pk\n" +
 			"ALTER TABLE accounts ADD CONSTRAINT accounts_pk PRIMARY KEY (id);\n",
 	},
+}
+
+// shared is the container for this package, or nil when docker is absent.
+var shared *harness.Harness
+
+// TestMain brings up one container for the package.
+func TestMain(m *testing.M) {
+	os.Exit(harness.Main(m, 0, func(_ context.Context, h *harness.Harness) error {
+		shared = h
+		return nil
+	}))
 }
 
 // fixOf runs the linter over the unsafe migration and returns the one

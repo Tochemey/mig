@@ -31,6 +31,10 @@ import (
 	"github.com/tochemey/mig/internal/step"
 )
 
+// Unreconcilable is what a step with no way to recognise its own finished work
+// is described as.
+const Unreconcilable = "cannot be reconciled: no predicate"
+
 // PlannedStep is one step and the condition it will be judged by.
 type PlannedStep struct {
 	// Migration is the file the step came from.
@@ -80,10 +84,6 @@ func Plan(fsys fs.FS) ([]PlannedStep, error) {
 
 	return planned, nil
 }
-
-// Unreconcilable is what a step with no way to recognise its own finished work
-// is described as.
-const Unreconcilable = "cannot be reconciled: no predicate"
 
 // describe reports the condition a step will be judged by, and whether it can
 // run at all.

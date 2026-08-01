@@ -34,7 +34,7 @@ import (
 
 func TestJSONRendersFindings(t *testing.T) {
 	findings := []rules.Finding{{
-		RuleID: "L001", Severity: rules.SeverityWarn, Message: "w",
+		RuleID: rules.L001, Severity: rules.SeverityWarn, Message: "w",
 		File: "m.sql", Step: "s", Span: rules.Span{Start: 1, End: 2, Line: 1},
 	}}
 
@@ -52,7 +52,7 @@ func TestJSONRendersFindings(t *testing.T) {
 		t.Fatalf("output is not JSON: %v\n%s", err, out.String())
 	}
 
-	if len(decoded.Findings) != 1 || decoded.Findings[0]["rule"] != "L001" ||
+	if len(decoded.Findings) != 1 || decoded.Findings[0]["rule"] != rules.L001 ||
 		decoded.Findings[0]["severity"] != "warn" {
 		t.Errorf("decoded %+v", decoded.Findings)
 	}

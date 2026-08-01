@@ -37,7 +37,7 @@ import (
 // all before Postgres 11. The lock model decides; the rule reports.
 type l003 struct{}
 
-func (l003) ID() string { return "L003" }
+func (l003) ID() string { return L003 }
 
 func (l003) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 	alter, cmds := alterCommands(stmt)
@@ -68,13 +68,13 @@ func (l003) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 			continue
 		}
 
-		found := finding(SeverityWarn, fmt.Sprintf(
+		found := sized(ctx, schema, name, fmt.Sprintf(
 			"ADD COLUMN rewrites %s under ACCESS EXCLUSIVE (%s); "+
 				"add the column nullable, backfill in batches, then constrain it",
-			qualified(schema, name), effect.Reason), ctx)
+			qualified(schema, name), effect.Reason))
 
 		if def, notNull, ok := fixableAddColumn(column); ok && len(cmds) == 1 {
-			found = withFix(found, fix.AddColumnWithDefault(alter.GetRelation(), column, def, notNull))
+			found = withFix(found, fix.AddColumnWithDefault(alter.GetRelation(), column, def, notNull, pagingKey(ctx, schema, name)))
 		}
 
 		findings = append(findings, found...)

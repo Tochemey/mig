@@ -33,6 +33,7 @@ import (
 	"testing"
 
 	"github.com/tochemey/mig/internal/cli"
+	"github.com/tochemey/mig/internal/lint/rules"
 )
 
 // unsafeMigration carries one fixable hazard and one that has no fix.
@@ -108,7 +109,7 @@ func TestLintFixRewritesAfterConsent(t *testing.T) {
 		t.Fatalf("re-lint: %v", err)
 	}
 
-	if strings.Contains(verdict, "L006") {
+	if strings.Contains(verdict, rules.L006) {
 		t.Errorf("the fixed hazard is still reported:\n%s", verdict)
 	}
 }

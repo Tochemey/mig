@@ -33,7 +33,7 @@ import (
 // table and blocks every write for the whole build.
 type l001 struct{}
 
-func (l001) ID() string { return "L001" }
+func (l001) ID() string { return L001 }
 
 func (l001) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 	index := stmt.GetStmt().GetIndexStmt()
@@ -48,7 +48,7 @@ func (l001) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 
 	table := qualified(relation.GetSchemaname(), relation.GetRelname())
 
-	return finding(SeverityWarn, fmt.Sprintf(
+	return sized(ctx, relation.GetSchemaname(), relation.GetRelname(), fmt.Sprintf(
 		"CREATE INDEX without CONCURRENTLY blocks writes to %s for the whole build; "+
-			"add CONCURRENTLY and mark the step notx", table), ctx)
+			"add CONCURRENTLY and mark the step notx", table))
 }

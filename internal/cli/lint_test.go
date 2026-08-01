@@ -31,6 +31,7 @@ import (
 	"testing"
 
 	"github.com/tochemey/mig/internal/cli"
+	"github.com/tochemey/mig/internal/lint/rules"
 )
 
 // The lint command connects to nothing, so it needs no container.
@@ -65,7 +66,7 @@ CREATE INDEX idx_users_email ON users (email);
 		t.Fatalf("a warning failed the run: %v", err)
 	}
 
-	for _, expect := range []string{"L001", "CREATE INDEX idx_users_email", "^", "1 finding(s)"} {
+	for _, expect := range []string{rules.L001, "CREATE INDEX idx_users_email", "^", "1 finding(s)"} {
 		if !strings.Contains(stdout, expect) {
 			t.Errorf("output lacks %q:\n%s", expect, stdout)
 		}
@@ -85,7 +86,7 @@ VACUUM FULL users;
 		t.Fatalf("err = %v, want the error count", err)
 	}
 
-	if !strings.Contains(stdout, "L010") {
+	if !strings.Contains(stdout, rules.L010) {
 		t.Errorf("output lacks the finding:\n%s", stdout)
 	}
 }
@@ -112,7 +113,7 @@ CREATE INDEX idx_users_email ON users (email);
 		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
 	}
 
-	if len(decoded.Findings) != 1 || decoded.Findings[0].Rule != "L001" {
+	if len(decoded.Findings) != 1 || decoded.Findings[0].Rule != rules.L001 {
 		t.Errorf("decoded %+v", decoded.Findings)
 	}
 }
@@ -134,8 +135,46 @@ ALTER TABLE users ADD COLUMN score int DEFAULT 0;
 		t.Fatalf("lint at 10: %v", err)
 	}
 
-	if !strings.Contains(stdout, "L003") {
+	if !strings.Contains(stdout, rules.L003) {
 		t.Errorf("the same default did not flag before Postgres 11:\n%s", stdout)
+	}
+}
+
+// TestLintConnectedGradesAndEstimates covers the --dsn path end to end: the
+// severity comes from the size the catalog reports, and the report carries
+// both that size and how long the work will take.
+func TestLintConnectedGradesAndEstimates(t *testing.T) {
+	database := newDatabase(t)
+	dir := t.TempDir()
+
+	write(t, dir, "20240817120000_widen.sql", `-- +mig step: widen_id
+ALTER TABLE users ALTER COLUMN id TYPE numeric;
+`)
+
+	stdout, _, err := run(t, "lint", "--dir", dir, "--dsn", shared.DSN(database))
+	if err != nil {
+		t.Fatalf("lint: %v", err)
+	}
+
+	// The seeded template is small, so the rewrite is worth knowing about and
+	// not worth failing over, and the size it was graded on is on the line.
+	for _, want := range []string{rules.L004, "info", "kB"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("connected output lacks %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestLintConnectedReportsAnUnreachableDatabase covers the connection failing
+// before anything is linted.
+func TestLintConnectedReportsAnUnreachableDatabase(t *testing.T) {
+	dir := t.TempDir()
+
+	write(t, dir, "20240817120000_x.sql", "SELECT 1;\n")
+
+	_, _, err := run(t, "lint", "--dir", dir, "--dsn", "postgres://nobody@127.0.0.1:1/none")
+	if err == nil {
+		t.Fatal("lint reported success against an unreachable database")
 	}
 }
 

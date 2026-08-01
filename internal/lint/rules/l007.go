@@ -27,13 +27,15 @@ import (
 	"fmt"
 
 	pgquery "github.com/pganalyze/pg_query_go/v6"
+
+	"github.com/tochemey/mig/internal/lint/fix"
 )
 
 // l007 flags ADD CHECK without NOT VALID, which scans the table under ACCESS
 // EXCLUSIVE instead of validating later without blocking anything.
 type l007 struct{}
 
-func (l007) ID() string { return "L007" }
+func (l007) ID() string { return L007 }
 
 func (l007) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 	alter, cmds := alterCommands(stmt)
@@ -56,10 +58,18 @@ func (l007) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 			continue
 		}
 
-		findings = append(findings, finding(SeverityWarn, fmt.Sprintf(
+		found := sized(ctx, schema, name, fmt.Sprintf(
 			"ADD CHECK scans %s under ACCESS EXCLUSIVE; "+
 				"add it NOT VALID, then VALIDATE CONSTRAINT in its own step",
-			qualified(schema, name)), ctx)...)
+			qualified(schema, name)))
+
+		// An anonymous check gets its name from the server, so the validation
+		// step would have nothing to name; that fix stays unwritten.
+		if constraint.GetConname() != "" && len(cmds) == 1 {
+			found = withFix(found, fix.CheckTwoStep(alter.GetRelation(), constraint))
+		}
+
+		findings = append(findings, found...)
 	}
 
 	return findings

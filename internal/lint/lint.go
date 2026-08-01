@@ -39,13 +39,48 @@ import (
 
 	"github.com/tochemey/mig/internal/lint/lockmodel"
 	"github.com/tochemey/mig/internal/lint/rules"
+	"github.com/tochemey/mig/internal/lint/stats"
 	"github.com/tochemey/mig/internal/plan"
 )
+
+// Relations lists every relation the plan's statements touch, the implicit
+// ones included, which is what connected mode reads the catalog about before
+// any rule runs.
+func Relations(p *plan.Plan, targetVersion int) ([]lockmodel.Relation, error) {
+	var relations []lockmodel.Relation
+
+	seen := make(map[lockmodel.Relation]bool)
+
+	for i := range p.Migrations {
+		migration := &p.Migrations[i]
+
+		for _, s := range migration.Steps {
+			for _, statement := range s.Statements {
+				parsed, err := parseOne(statement.SQL)
+				if err != nil {
+					return nil, fmt.Errorf("migration %q step %q: %w", migration.File, s.Name, err)
+				}
+
+				for _, effect := range lockmodel.AnalyzeStatement(parsed, targetVersion).Effects {
+					if !seen[effect.Relation] {
+						seen[effect.Relation] = true
+						relations = append(relations, effect.Relation)
+					}
+				}
+			}
+		}
+	}
+
+	return relations, nil
+}
 
 // Run lints every migration in the plan. It returns the findings ordered by
 // file and position, and the raw contents of each linted file, which is what
 // a renderer needs to show the offending line.
-func Run(fsys fs.FS, p *plan.Plan, targetVersion int) ([]rules.Finding, map[string]string, error) {
+//
+// The snapshot is what the catalog said about those relations, and is nil
+// offline: without it every size-dependent hazard stays a warning.
+func Run(fsys fs.FS, p *plan.Plan, targetVersion int, snapshot *stats.Snapshot) ([]rules.Finding, map[string]string, error) {
 	var findings []rules.Finding
 
 	sources := make(map[string]string, len(p.Migrations))
@@ -60,7 +95,7 @@ func Run(fsys fs.FS, p *plan.Plan, targetVersion int) ([]rules.Finding, map[stri
 
 		sources[migration.File] = string(content)
 
-		found, err := lintMigration(migration, string(content), targetVersion)
+		found, err := lintMigration(migration, string(content), targetVersion, snapshot)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -84,7 +119,8 @@ func Run(fsys fs.FS, p *plan.Plan, targetVersion int) ([]rules.Finding, map[stri
 }
 
 // lintMigration runs every rule over every statement of one migration.
-func lintMigration(migration *plan.Migration, content string, version int) ([]rules.Finding, error) {
+func lintMigration(migration *plan.Migration, content string, version int,
+	snapshot *stats.Snapshot) ([]rules.Finding, error) {
 	var findings []rules.Finding
 
 	cursor := 0
@@ -105,6 +141,7 @@ func lintMigration(migration *plan.Migration, content string, version int) ([]ru
 				StepIndex:     stepIndex,
 				StmtIndex:     stmtIndex,
 				Analysis:      lockmodel.AnalyzeStatement(parsed, version),
+				Stats:         snapshot,
 			}
 
 			for _, rule := range rules.All() {

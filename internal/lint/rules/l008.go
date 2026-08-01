@@ -36,7 +36,7 @@ import (
 // built concurrently first, it is adopted in catalog time.
 type l008 struct{}
 
-func (l008) ID() string { return "L008" }
+func (l008) ID() string { return L008 }
 
 func (l008) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 	alter, cmds := alterCommands(stmt)
@@ -57,10 +57,10 @@ func (l008) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 			continue
 		}
 
-		found := finding(SeverityWarn, fmt.Sprintf(
+		found := sized(ctx, schema, name, fmt.Sprintf(
 			"ADD PRIMARY KEY builds its index while blocking all access to %s; "+
 				"build a unique index concurrently first and adopt it with USING INDEX",
-			qualified(schema, name)), ctx)
+			qualified(schema, name)))
 
 		// Only the constraint form is replaced; a key inline on a new column
 		// would need the column split out first.

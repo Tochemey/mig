@@ -81,7 +81,7 @@ func TestAddColumnWithDefault(t *testing.T) {
 		}
 	}
 
-	got := render(t, AddColumnWithDefault(rel, column, def, true))
+	got := render(t, AddColumnWithDefault(rel, column, def, true, ""))
 
 	contains(t, got, []string{
 		"-- +mig step: add_users_email_nullable\n",
@@ -113,16 +113,19 @@ func TestAddColumnWithoutNotNullStopsAtTheBackfill(t *testing.T) {
 	column := cmd.GetDef().GetColumnDef()
 	def := column.GetConstraints()[0].GetConstraint().GetRawExpr()
 
-	got := render(t, AddColumnWithDefault(rel, column, def, false))
+	got := render(t, AddColumnWithDefault(rel, column, def, false, "user_id"))
 
 	if strings.Contains(got, "NOT NULL") {
 		t.Errorf("a nullable column grew a not-null tail:\n%s", got)
 	}
 
-	// A qualified table stays qualified in the annotation and the SQL.
+	// A qualified table stays qualified in the annotation and the SQL, and a
+	// key the catalog named is paged by rather than guessed at.
 	contains(t, got, []string{
-		"-- +mig backfill: table=app.users key=id batch=5000\n",
+		"-- +mig backfill: table=app.users key=user_id batch=5000\n",
+		"key=user_id is the table's primary key\n",
 		"UPDATE app.users SET score = 0",
+		"WHERE user_id > :cursor_lo",
 	})
 }
 
@@ -158,6 +161,24 @@ func TestForeignKeyTwoStep(t *testing.T) {
 	}
 }
 
+func TestCheckTwoStep(t *testing.T) {
+	rel, cmd := alterOf(t,
+		"ALTER TABLE users ADD CONSTRAINT users_score_positive CHECK (score > 0)")
+
+	con := cmd.GetDef().GetConstraint()
+	got := render(t, CheckTwoStep(rel, con))
+
+	contains(t, got, []string{
+		"ALTER TABLE users ADD CONSTRAINT users_score_positive CHECK (score > 0) NOT VALID;\n",
+		"-- +mig notx\n",
+		"ALTER TABLE users VALIDATE CONSTRAINT users_score_positive;\n",
+	})
+
+	if con.GetSkipValidation() {
+		t.Error("the builder mutated the caller's constraint")
+	}
+}
+
 func TestPrimaryKeyViaIndex(t *testing.T) {
 	rel, cmd := alterOf(t, "ALTER TABLE users ADD CONSTRAINT users_pk PRIMARY KEY (id, org)")
 
@@ -184,7 +205,7 @@ func TestPrimaryKeyViaIndexNamesAnAnonymousKey(t *testing.T) {
 func TestTypeChangeScaffold(t *testing.T) {
 	rel, cmd := alterOf(t, "ALTER TABLE users ALTER COLUMN id TYPE bigint")
 
-	f := TypeChangeScaffold(rel, cmd)
+	f := TypeChangeScaffold(rel, cmd, "")
 	if !f.Scaffold {
 		t.Fatal("a type change came back executable")
 	}
@@ -204,7 +225,7 @@ func TestTypeChangeScaffoldKeepsTheUsingExpression(t *testing.T) {
 	rel, cmd := alterOf(t,
 		"ALTER TABLE users ALTER COLUMN flags TYPE jsonb USING to_jsonb(flags)")
 
-	got := render(t, TypeChangeScaffold(rel, cmd))
+	got := render(t, TypeChangeScaffold(rel, cmd, ""))
 
 	contains(t, got, []string{
 		"-- UPDATE users SET flags__new = to_jsonb(flags)",

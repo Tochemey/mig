@@ -45,6 +45,52 @@ import (
 	"github.com/tochemey/mig/internal/ledger"
 )
 
+// The three statements of an acquisition, run in one transaction.
+//
+// Locking the ownership row first serialises acquirers against each other and
+// against any in-flight ledger write, so a lease cannot be taken while its
+// holder is part-way through a commit. Expiry is judged by the server's clock,
+// so runners whose own clocks disagree still agree on whether a lease lapsed.
+const (
+	// Both rows are locked, not just the lease. A waiter that blocks here
+	// re-reads the rows it locked once the lock clears, and only those: with
+	// the expiry row unlocked it would re-read the new owner beside the old
+	// row's expiry, see the NULL that stood there before the winner set it,
+	// conclude the lease had lapsed, and take a lease someone else holds.
+	claimQuery = `
+SELECT l.owner IS NULL OR e.expires_at IS NULL OR e.expires_at < now()
+  FROM mig.lease l
+  JOIN mig.lease_expiry e ON e.id = l.id
+ WHERE l.id = 1
+   FOR UPDATE OF l, e`
+
+	takeQuery = `
+UPDATE mig.lease
+   SET owner = $1, fence = fence + 1
+ WHERE id = 1
+RETURNING fence`
+
+	startExpiryQuery = `
+UPDATE mig.lease_expiry
+   SET expires_at = now() + make_interval(secs => $1), heartbeat_at = now()
+ WHERE id = 1`
+)
+
+// releaseQuery returns a row only when the caller still holds the lease, which
+// enforces the fence without a second round trip.
+const releaseQuery = `
+UPDATE mig.lease
+   SET owner = NULL
+ WHERE id = 1 AND owner = $1 AND fence = $2
+RETURNING fence`
+
+// clearExpiryQuery lapses the lease so the next runner need not wait out the
+// TTL. It runs in the same transaction as the release.
+const clearExpiryQuery = `
+UPDATE mig.lease_expiry
+   SET expires_at = NULL, heartbeat_at = NULL
+ WHERE id = 1`
+
 const (
 	// DefaultTTL is how long a lease stays valid without a heartbeat.
 	DefaultTTL = 30 * time.Second
@@ -130,41 +176,12 @@ type Lease struct {
 	renewedAt time.Time
 }
 
-// The three statements of an acquisition, run in one transaction.
-//
-// Locking the ownership row first serialises acquirers against each other and
-// against any in-flight ledger write, so a lease cannot be taken while its
-// holder is part-way through a commit. Expiry is judged by the server's clock,
-// so runners whose own clocks disagree still agree on whether a lease lapsed.
-const (
-	// Both rows are locked, not just the lease. A waiter that blocks here
-	// re-reads the rows it locked once the lock clears, and only those: with
-	// the expiry row unlocked it would re-read the new owner beside the old
-	// row's expiry, see the NULL that stood there before the winner set it,
-	// conclude the lease had lapsed, and take a lease someone else holds.
-	claimQuery = `
-SELECT l.owner IS NULL OR e.expires_at IS NULL OR e.expires_at < now()
-  FROM mig.lease l
-  JOIN mig.lease_expiry e ON e.id = l.id
- WHERE l.id = 1
-   FOR UPDATE OF l, e`
-
-	takeQuery = `
-UPDATE mig.lease
-   SET owner = $1, fence = fence + 1
- WHERE id = 1
-RETURNING fence`
-
-	startExpiryQuery = `
-UPDATE mig.lease_expiry
-   SET expires_at = now() + make_interval(secs => $1), heartbeat_at = now()
- WHERE id = 1`
-)
-
 // NewOwner builds an owner identifier from host, process and a random suffix.
 // The random suffix keeps two processes that share a pid in different
 // containers from looking like the same runner.
 func NewOwner() string {
+	// A host nobody can name still leaves the pid and the random suffix to
+	// tell two runners apart, which is all the owner string is for.
 	host, _ := os.Hostname()
 
 	return fmt.Sprintf("%s/%d/%s", host, os.Getpid(), rand.Text())
@@ -265,21 +282,6 @@ func (l *Lease) Fence() ledger.Fence {
 func (l *Lease) TTL() time.Duration {
 	return l.ttl
 }
-
-// releaseQuery returns a row only when the caller still holds the lease, which
-// enforces the fence without a second round trip.
-const releaseQuery = `
-UPDATE mig.lease
-   SET owner = NULL
- WHERE id = 1 AND owner = $1 AND fence = $2
-RETURNING fence`
-
-// clearExpiryQuery lapses the lease so the next runner need not wait out the
-// TTL. It runs in the same transaction as the release.
-const clearExpiryQuery = `
-UPDATE mig.lease_expiry
-   SET expires_at = NULL, heartbeat_at = NULL
- WHERE id = 1`
 
 // Release hands the lease back so the next runner need not wait out the TTL.
 //

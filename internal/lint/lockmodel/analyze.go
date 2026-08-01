@@ -29,6 +29,25 @@ import (
 	pgquery "github.com/pganalyze/pg_query_go/v6"
 )
 
+// droppable maps the object classes whose DROP locks a relation.
+var droppable = map[pgquery.ObjectType]string{
+	pgquery.ObjectType_OBJECT_TABLE:    "drop table",
+	pgquery.ObjectType_OBJECT_INDEX:    "drop index",
+	pgquery.ObjectType_OBJECT_VIEW:     "drop view",
+	pgquery.ObjectType_OBJECT_MATVIEW:  "drop materialized view",
+	pgquery.ObjectType_OBJECT_SEQUENCE: "drop sequence",
+}
+
+// renameable maps the object classes whose RENAME locks a relation.
+var renameable = map[pgquery.ObjectType]string{
+	pgquery.ObjectType_OBJECT_TABLE:         "rename table",
+	pgquery.ObjectType_OBJECT_COLUMN:        "rename column",
+	pgquery.ObjectType_OBJECT_TABCONSTRAINT: "rename constraint",
+	pgquery.ObjectType_OBJECT_VIEW:          "rename view",
+	pgquery.ObjectType_OBJECT_MATVIEW:       "rename materialized view",
+	pgquery.ObjectType_OBJECT_INDEX:         "rename index",
+}
+
 // Analyze predicts the locks one statement takes on a server of the given
 // major version.
 //
@@ -143,15 +162,6 @@ func createIndex(stmt *pgquery.IndexStmt) Analysis {
 	return Analysis{Effects: []LockEffect{effect}}
 }
 
-// droppable maps the object classes whose DROP locks a relation.
-var droppable = map[pgquery.ObjectType]string{
-	pgquery.ObjectType_OBJECT_TABLE:    "drop table",
-	pgquery.ObjectType_OBJECT_INDEX:    "drop index",
-	pgquery.ObjectType_OBJECT_VIEW:     "drop view",
-	pgquery.ObjectType_OBJECT_MATVIEW:  "drop materialized view",
-	pgquery.ObjectType_OBJECT_SEQUENCE: "drop sequence",
-}
-
 // dropObjects covers DROP TABLE, INDEX, VIEW, MATERIALIZED VIEW and SEQUENCE.
 // Only an index may be dropped concurrently.
 func dropObjects(stmt *pgquery.DropStmt) Analysis {
@@ -207,16 +217,6 @@ func relationFromNameList(object *pgquery.Node) (Relation, bool) {
 	}
 }
 
-// renameable maps the object classes whose RENAME locks a relation.
-var renameable = map[pgquery.ObjectType]string{
-	pgquery.ObjectType_OBJECT_TABLE:         "rename table",
-	pgquery.ObjectType_OBJECT_COLUMN:        "rename column",
-	pgquery.ObjectType_OBJECT_TABCONSTRAINT: "rename constraint",
-	pgquery.ObjectType_OBJECT_VIEW:          "rename view",
-	pgquery.ObjectType_OBJECT_MATVIEW:       "rename materialized view",
-	pgquery.ObjectType_OBJECT_INDEX:         "rename index",
-}
-
 // rename covers ALTER ... RENAME. Renaming an index needs only SHARE UPDATE
 // EXCLUSIVE from Postgres 12 on; every other rename takes ACCESS EXCLUSIVE.
 func rename(stmt *pgquery.RenameStmt, version int) Analysis {
@@ -262,7 +262,7 @@ func vacuum(stmt *pgquery.VacuumStmt) Analysis {
 	full := false
 
 	for _, option := range stmt.GetOptions() {
-		if option.GetDefElem().GetDefname() == "full" {
+		if option.GetDefElem().GetDefname() == OptionFull {
 			full = true
 		}
 	}
@@ -337,7 +337,7 @@ func reindex(stmt *pgquery.ReindexStmt) Analysis {
 	concurrent := false
 
 	for _, param := range stmt.GetParams() {
-		if param.GetDefElem().GetDefname() == "concurrently" {
+		if param.GetDefElem().GetDefname() == OptionConcurrently {
 			concurrent = true
 		}
 	}

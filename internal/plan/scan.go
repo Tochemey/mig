@@ -57,6 +57,16 @@ const (
 	annNoLockTimeout = "no_lock_timeout"
 )
 
+// The fields of a backfill annotation. They are exported with the annotation
+// names above so that the linter's fix engine writes the same spellings the
+// loader reads back.
+const (
+	BackfillTable  = "table"
+	BackfillKey    = "key"
+	BackfillBatch  = "batch"
+	BackfillMaxLag = "max_lag_bytes"
+)
+
 // The placeholders a backfill's SQL uses for the range its batch covers. They
 // are rewritten to bind parameters before the statement is parsed, since the
 // Postgres grammar does not accept them.
@@ -246,7 +256,7 @@ func applyBackfill(s *Step, spec string) error {
 	}
 
 	if s.Backfill.Table == "" || s.Backfill.Key == "" {
-		return fmt.Errorf("%w: backfill needs table= and key=", ErrBadBackfill)
+		return fmt.Errorf("%w: backfill needs %s= and %s=", ErrBadBackfill, BackfillTable, BackfillKey)
 	}
 
 	return nil
@@ -255,13 +265,13 @@ func applyBackfill(s *Step, spec string) error {
 // applyBackfillField records one setting of a backfill annotation.
 func applyBackfillField(s *Step, name, value string) error {
 	switch name {
-	case "table":
+	case BackfillTable:
 		s.Backfill.Table = value
 
-	case "key":
+	case BackfillKey:
 		s.Backfill.Key = value
 
-	case "batch":
+	case BackfillBatch:
 		batch, err := strconv.Atoi(value)
 		if err != nil || batch <= 0 {
 			return fmt.Errorf("%w: batch %q is not a positive number", ErrBadBackfill, value)
@@ -269,7 +279,7 @@ func applyBackfillField(s *Step, name, value string) error {
 
 		s.Backfill.Batch = batch
 
-	case "max_lag_bytes":
+	case BackfillMaxLag:
 		lag, err := strconv.ParseInt(value, 10, 64)
 		if err != nil || lag < 0 {
 			return fmt.Errorf("%w: max_lag_bytes %q is not a number", ErrBadBackfill, value)

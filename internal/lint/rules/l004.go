@@ -36,7 +36,7 @@ import (
 // mode refines it later.
 type l004 struct{}
 
-func (l004) ID() string { return "L004" }
+func (l004) ID() string { return L004 }
 
 func (l004) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 	alter, cmds := alterCommands(stmt)
@@ -61,15 +61,15 @@ func (l004) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 		return nil
 	}
 
-	found := finding(SeverityWarn, fmt.Sprintf(
+	found := sized(ctx, schema, name, fmt.Sprintf(
 		"changing a column type rewrites %s under ACCESS EXCLUSIVE; "+
 			"add a new column, backfill, swap reads, then drop the old one",
-		qualified(schema, name)), ctx)
+		qualified(schema, name)))
 
 	// The replacement is a scaffold: the write gap between backfill and swap
 	// is not a pure SQL problem, so the plan arrives commented out.
 	if len(cmds) == 1 {
-		found = withFix(found, fix.TypeChangeScaffold(alter.GetRelation(), change))
+		found = withFix(found, fix.TypeChangeScaffold(alter.GetRelation(), change, pagingKey(ctx, schema, name)))
 	}
 
 	return found

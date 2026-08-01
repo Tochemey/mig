@@ -34,7 +34,7 @@ import (
 // fails it at review time.
 type l002 struct{}
 
-func (l002) ID() string { return "L002" }
+func (l002) ID() string { return L002 }
 
 func (l002) Check(ctx Context, _ *pgquery.RawStmt) []Finding {
 	if !ctx.Analysis.NoTx {

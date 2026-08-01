@@ -33,20 +33,32 @@ import (
 // backfillBatch is the batch size generated backfills start at.
 const backfillBatch = 5000
 
-// assumedKey is the cursor column a generated backfill assumes. Offline,
+// assumedKey is the cursor column a generated backfill falls back to. Offline,
 // nothing says which column is the primary key; the step's comment tells the
 // reviewer to correct it, and a wrong assumption fails loudly at run time
-// rather than quietly doing the wrong thing.
+// rather than quietly doing the wrong thing. Connected, the catalog names the
+// real one and the comment says so instead.
 const assumedKey = "id"
+
+// pagingKey picks the column a generated backfill pages by, and explains the
+// choice in the step's own comment.
+func pagingKey(key string) (column, note string) {
+	if key == "" {
+		return assumedKey, "key=" + assumedKey + " is assumed, point it at the primary key if that is not right"
+	}
+
+	return key, "key=" + key + " is the table's primary key"
+}
 
 // AddColumnWithDefault replaces ADD COLUMN with a rewriting default by the
 // expand route: the column arrives empty, the default applies to future rows
 // only, old rows are backfilled in batches, and NOT NULL, when the original
 // asked for it, arrives through a validated check.
 func AddColumnWithDefault(rel *pgquery.RangeVar, column *pgquery.ColumnDef,
-	def *pgquery.Node, notNull bool) *Fix {
+	def *pgquery.Node, notNull bool, key string) *Fix {
 	name := rel.GetRelname() + "_" + column.GetColname()
 	col := column.GetColname()
+	cursor, note := pagingKey(key)
 
 	bare := dup(column)
 	bare.Constraints = nil
@@ -66,17 +78,15 @@ func AddColumnWithDefault(rel *pgquery.RangeVar, column *pgquery.ColumnDef,
 				alterCmd(pgquery.AlterTableType_AT_ColumnDefault, col, dup(def)))},
 		},
 		{
-			Name: "backfill_" + name,
-			Comment: fmt.Sprintf(
-				"batched so each transaction stays short; key=%s is assumed, point it "+
-					"at the primary key if that is not right", assumedKey),
+			Name:    "backfill_" + name,
+			Comment: "batched so each transaction stays short; " + note,
 			Backfill: &Backfill{
 				Table:     qualifiedTable(rel),
-				Key:       assumedKey,
+				Key:       cursor,
 				Batch:     backfillBatch,
 				Satisfied: noNullsRemain(rel, col),
 			},
-			Stmts: []*pgquery.Node{backfillUpdate(rel, col, dup(def), assumedKey)},
+			Stmts: []*pgquery.Node{backfillUpdate(rel, col, dup(def), cursor)},
 		},
 	}
 
@@ -166,6 +176,24 @@ func regclass(rel *pgquery.RangeVar) string {
 // separate validation, so the long scan holds SHARE UPDATE EXCLUSIVE instead
 // of blocking writes to both tables.
 func ForeignKeyTwoStep(rel *pgquery.RangeVar, con *pgquery.Constraint) *Fix {
+	return constraintTwoStep(rel, con,
+		"NOT VALID: the key holds for new writes at once, no scan yet",
+		"the scan happens here, without blocking writes to either table")
+}
+
+// CheckTwoStep replaces ADD CHECK with the NOT VALID form plus a separate
+// validation, so the scan holds SHARE UPDATE EXCLUSIVE instead of ACCESS
+// EXCLUSIVE.
+func CheckTwoStep(rel *pgquery.RangeVar, con *pgquery.Constraint) *Fix {
+	return constraintTwoStep(rel, con,
+		"NOT VALID: the check holds for new rows at once, no scan yet",
+		"the scan happens here, blocking neither reads nor writes")
+}
+
+// constraintTwoStep defers a constraint's validation out of the statement
+// that adds it. The comments differ per constraint kind because what the
+// deferred scan stops blocking does.
+func constraintTwoStep(rel *pgquery.RangeVar, con *pgquery.Constraint, add, validate string) *Fix {
 	name := con.GetConname()
 
 	deferred := dup(con)
@@ -175,13 +203,13 @@ func ForeignKeyTwoStep(rel *pgquery.RangeVar, con *pgquery.Constraint) *Fix {
 	return &Fix{Steps: []Step{
 		{
 			Name:    "add_" + name + "_not_valid",
-			Comment: "NOT VALID: the key holds for new writes at once, no scan yet",
+			Comment: add,
 			Stmts: []*pgquery.Node{alterTable(rel,
 				alterCmd(pgquery.AlterTableType_AT_AddConstraint, "", constraint(deferred)))},
 		},
 		{
 			Name:    "validate_" + name,
-			Comment: "the scan happens here, without blocking writes to either table",
+			Comment: validate,
 			NoTx:    true,
 			Stmts: []*pgquery.Node{alterTable(rel,
 				alterCmd(pgquery.AlterTableType_AT_ValidateConstraint, name, nil))},
@@ -231,8 +259,9 @@ func PrimaryKeyViaIndex(rel *pgquery.RangeVar, con *pgquery.Constraint) *Fix {
 // is a scaffold, not a migration: writes landing between the backfill and
 // the swap are lost unless the application dual-writes or traffic pauses,
 // and that decision cannot be made in SQL.
-func TypeChangeScaffold(rel *pgquery.RangeVar, cmd *pgquery.AlterTableCmd) *Fix {
+func TypeChangeScaffold(rel *pgquery.RangeVar, cmd *pgquery.AlterTableCmd, key string) *Fix {
 	column := cmd.GetName()
+	cursor, note := pagingKey(key)
 	newColumn := column + "__new"
 	prefix := rel.GetRelname() + "_"
 	target := cmd.GetDef().GetColumnDef()
@@ -262,14 +291,14 @@ func TypeChangeScaffold(rel *pgquery.RangeVar, cmd *pgquery.AlterTableCmd) *Fix 
 				Name: "backfill_" + prefix + newColumn,
 				Comment: fmt.Sprintf(
 					"rows where %s is NULL stay NULL; adjust the predicate if the "+
-						"column is nullable. key=%s is assumed", column, assumedKey),
+						"column is nullable. %s", column, note),
 				Backfill: &Backfill{
 					Table:     qualifiedTable(rel),
-					Key:       assumedKey,
+					Key:       cursor,
 					Batch:     backfillBatch,
 					Satisfied: noNullsRemain(rel, newColumn),
 				},
-				Stmts: []*pgquery.Node{backfillUpdate(rel, newColumn, value, assumedKey)},
+				Stmts: []*pgquery.Node{backfillUpdate(rel, newColumn, value, cursor)},
 			},
 			{
 				Name:    "swap_" + prefix + column,

@@ -92,6 +92,9 @@ func At(point string) {
 		return
 	}
 
+	// A failure has nowhere to go: the caller is a migration step, and the
+	// only reason the signal is refused is that this process is already
+	// leaving.
 	_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 }
 

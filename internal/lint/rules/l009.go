@@ -33,7 +33,7 @@ import (
 // the ACCESS EXCLUSIVE the column addition already holds.
 type l009 struct{}
 
-func (l009) ID() string { return "L009" }
+func (l009) ID() string { return L009 }
 
 func (l009) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 	alter, cmds := alterCommands(stmt)

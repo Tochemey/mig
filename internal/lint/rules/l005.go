@@ -38,7 +38,7 @@ import (
 // NOT VALID and validating it first, is not flagged.
 type l005 struct{}
 
-func (l005) ID() string { return "L005" }
+func (l005) ID() string { return L005 }
 
 func (l005) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 	alter, cmds := alterCommands(stmt)
@@ -64,10 +64,10 @@ func (l005) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 			continue
 		}
 
-		found := finding(SeverityWarn, fmt.Sprintf(
+		found := sized(ctx, schema, name, fmt.Sprintf(
 			"SET NOT NULL scans %s under ACCESS EXCLUSIVE to verify %q; "+
 				"add CHECK (%s IS NOT NULL) NOT VALID, validate it, then set NOT NULL",
-			qualified(schema, name), column, column), ctx)
+			qualified(schema, name), column, column))
 
 		// Before 12 the server rescans at SET NOT NULL regardless, so the
 		// pattern would add steps without removing the scan.
@@ -119,14 +119,12 @@ func validatedNotNullCheck(ctx Context, table, column string) bool {
 // CHECK (column IS NOT NULL), under what name, and whether it was validated
 // at creation rather than deferred with NOT VALID.
 func notNullCheck(sql, column string) (name string, proven, immediate bool) {
-	tree, err := pgquery.Parse(sql)
-	if err != nil {
-		// The plan already parsed this statement, so a failure here cannot
-		// name a constraint that proves anything.
-		return "", false, false
-	}
+	// The plan already parsed this statement. Were it somehow unparseable
+	// here, the empty tree says what the failure means: nothing on it proves
+	// the column.
+	tree, _ := pgquery.Parse(sql)
 
-	for _, raw := range tree.Stmts {
+	for _, raw := range tree.GetStmts() {
 		alter := raw.GetStmt().GetAlterTableStmt()
 
 		for _, node := range alter.GetCmds() {

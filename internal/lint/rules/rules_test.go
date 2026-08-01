@@ -29,14 +29,21 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 
 	"github.com/tochemey/mig/internal/lint"
+	"github.com/tochemey/mig/internal/lint/lockmodel"
 	"github.com/tochemey/mig/internal/lint/report"
 	"github.com/tochemey/mig/internal/lint/rules"
+	"github.com/tochemey/mig/internal/lint/stats"
 	"github.com/tochemey/mig/internal/plan"
 )
+
+// sizedHazard is one statement whose cost is the table it names, so a run of
+// it says what the grader made of that table.
+const sizedHazard = "-- +mig step: widen\nALTER TABLE t ALTER COLUMN c TYPE bigint;\n"
 
 // update rewrites the golden files instead of comparing against them. Run
 // with: go test ./internal/lint/rules -update, then audit the diff by hand.
@@ -66,7 +73,7 @@ func goldenAt(t *testing.T, id string, version int) {
 		t.Fatalf("load fixture: %v", err)
 	}
 
-	findings, _, err := lint.Run(fsys, loaded, version)
+	findings, _, err := lint.Run(fsys, loaded, version, nil)
 	if err != nil {
 		t.Fatalf("lint fixture: %v", err)
 	}
@@ -92,6 +99,234 @@ func goldenAt(t *testing.T, id string, version int) {
 
 	if !bytes.Equal(got.Bytes(), want) {
 		t.Errorf("findings diverge from %s\ngot:\n%s\nwant:\n%s", path, got.Bytes(), want)
+	}
+}
+
+// lintWith runs one statement against a snapshot and returns what came back.
+func lintWith(t *testing.T, snapshot *stats.Snapshot) rules.Finding {
+	t.Helper()
+
+	fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(sizedHazard)}}
+
+	loaded, err := plan.LoadFS(fsys)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	findings, _, err := lint.Run(fsys, loaded, 18, snapshot)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(findings) != 1 {
+		t.Fatalf("found %d findings, want the rewrite: %+v", len(findings), findings)
+	}
+
+	return findings[0]
+}
+
+// snapshotOf builds a snapshot holding one table t, measured at a rate that
+// makes the arithmetic in the expectations legible: ten megabytes a second.
+func snapshotOf(table stats.Table) *stats.Snapshot {
+	return stats.Of(map[lockmodel.Relation]stats.Table{{Name: "t"}: table}).
+		WithThroughput(stats.Throughput{
+			Rewrite: 10 << 20, IndexBuild: 10 << 20,
+			// Fast enough per row that the size is what decides these
+			// estimates; the two costs are weighed against each other in the
+			// stats package's own tests.
+			RewriteRows: 1 << 30, IndexRows: 1 << 30,
+		})
+}
+
+// TestSeverityFollowsTheTableSize is §6, the rule the linter's credibility
+// rests on: the same statement is an outage, a warning or an observation
+// depending on what it is pointed at, and offline it is always a warning
+// because nothing there knows.
+func TestSeverityFollowsTheTableSize(t *testing.T) {
+	cases := []struct {
+		name     string
+		snapshot *stats.Snapshot
+		want     rules.Severity
+	}{
+		{
+			name: "offline nothing is known and nothing is claimed",
+			want: rules.SeverityWarn,
+		},
+		{
+			name:     "a table the catalog does not have yet",
+			snapshot: snapshotOf(stats.Table{}),
+			want:     rules.SeverityWarn,
+		},
+		{
+			name:     "a lookup table",
+			snapshot: snapshotOf(stats.Table{Exists: true, Rows: 12, Bytes: 8 << 10}),
+			want:     rules.SeverityInfo,
+		},
+		{
+			name:     "a table between the two",
+			snapshot: snapshotOf(stats.Table{Exists: true, Rows: 200_000, Bytes: 64 << 20}),
+			want:     rules.SeverityWarn,
+		},
+		{
+			name:     "a table large enough by rows",
+			snapshot: snapshotOf(stats.Table{Exists: true, Rows: 41_200_000, Bytes: 64 << 20}),
+			want:     rules.SeverityError,
+		},
+		{
+			name:     "a table large enough by size, never analysed",
+			snapshot: snapshotOf(stats.Table{Exists: true, Bytes: 2 << 30}),
+			want:     rules.SeverityError,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := lintWith(t, tc.snapshot).Severity; got != tc.want {
+				t.Errorf("severity = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDetailCarriesTheSizeItWasGradedOn covers the reporting half: a reader
+// who disagrees with the grade has to be able to see what it was based on.
+func TestDetailCarriesTheSizeItWasGradedOn(t *testing.T) {
+	cases := []struct {
+		name  string
+		table stats.Table
+		want  string
+	}{
+		{
+			name:  "rows and size when the table has been analysed",
+			table: stats.Table{Exists: true, Rows: 41_200_000, Bytes: 365 << 30},
+			want:  "on t (41.2M rows, 365.0 GB), held for a table rewrite",
+		},
+		{
+			name:  "size alone when it has not",
+			table: stats.Table{Exists: true, Bytes: 2 << 30},
+			want:  "on t (2.0 GB), held for a table rewrite",
+		},
+		{
+			name:  "neither when the catalog does not have the table",
+			table: stats.Table{},
+			want:  "on t, held for a table rewrite",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if detail := lintWith(t, snapshotOf(tc.table)).Detail; !strings.Contains(detail, tc.want) {
+				t.Errorf("detail = %q, want it to carry %q", detail, tc.want)
+			}
+		})
+	}
+}
+
+// TestSizesReadTheWayAPersonSaysThem covers the small end of both scales,
+// where an exact figure beats a rounded one.
+func TestSizesReadTheWayAPersonSaysThem(t *testing.T) {
+	detail := lintWith(t, snapshotOf(stats.Table{Exists: true, Rows: 12, Bytes: 512})).Detail
+
+	if !strings.Contains(detail, "(12 rows, 512 B)") {
+		t.Errorf("detail = %q, want the exact figures", detail)
+	}
+}
+
+// TestEstimateIsReportedForWorkWorthWaitingFor covers the estimate line: it
+// scales with the table, states its method, and is left off work that is over
+// before anyone looks.
+func TestEstimateIsReportedForWorkWorthWaitingFor(t *testing.T) {
+	// A gibibyte at ten mebibytes a second is a hundred and two seconds, and
+	// the range brackets it: three quarters of it to twice it.
+	big := lintWith(t, snapshotOf(stats.Table{Exists: true, Rows: 4_000_000, Bytes: 1 << 30}))
+
+	for _, want := range []string{"estimated 1m17s to 3m25s", "measured throughput"} {
+		if !strings.Contains(big.Estimate, want) {
+			t.Errorf("estimate = %q, want it to carry %q", big.Estimate, want)
+		}
+	}
+
+	small := lintWith(t, snapshotOf(stats.Table{Exists: true, Rows: 12, Bytes: 8 << 10}))
+	if small.Estimate != "" {
+		t.Errorf("a table of 8 kB was estimated at %q", small.Estimate)
+	}
+
+	// Without a probe there is no rate to scale by, and no estimate is owed.
+	unmeasured := stats.Of(map[lockmodel.Relation]stats.Table{
+		{Name: "t"}: {Exists: true, Rows: 4_000_000, Bytes: 1 << 30},
+	})
+
+	if estimate := lintWith(t, unmeasured).Estimate; estimate != "" {
+		t.Errorf("an unmeasured server produced %q", estimate)
+	}
+}
+
+// TestGeneratedBackfillsPageByTheRealKey covers what the catalog is worth to
+// a fix: offline the key is a guess the comment owns up to, connected it is
+// the table's own, and a composite key is left as a guess because the format
+// pages by one column.
+func TestGeneratedBackfillsPageByTheRealKey(t *testing.T) {
+	const addColumn = "-- +mig step: add\n" +
+		"ALTER TABLE t ADD COLUMN token uuid NOT NULL DEFAULT gen_random_uuid();\n"
+
+	cases := []struct {
+		name  string
+		key   []string
+		want  string
+		avoid string
+	}{
+		{
+			name:  "offline the key is assumed and said to be",
+			want:  "key=id is assumed",
+			avoid: "primary key\n",
+		},
+		{
+			name: "connected it is the table's own",
+			key:  []string{"user_id"},
+			want: "key=user_id is the table's primary key",
+		},
+		{
+			name:  "a composite key is not one column to page by",
+			key:   []string{"tenant", "user_id"},
+			want:  "key=id is assumed",
+			avoid: "key=tenant",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(addColumn)}}
+
+			loaded, err := plan.LoadFS(fsys)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+
+			var snapshot *stats.Snapshot
+
+			if tc.key != nil {
+				snapshot = stats.Of(map[lockmodel.Relation]stats.Table{
+					{Name: "t"}: {Exists: true, Rows: 500, Bytes: 1 << 20, PrimaryKey: tc.key},
+				})
+			}
+
+			findings, _, err := lint.Run(fsys, loaded, 18, snapshot)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+
+			if len(findings) != 1 {
+				t.Fatalf("found %d findings, want the rewriting default: %+v", len(findings), findings)
+			}
+
+			if !strings.Contains(findings[0].Fix, tc.want) {
+				t.Errorf("fix does not page by %q:\n%s", tc.want, findings[0].Fix)
+			}
+
+			if tc.avoid != "" && strings.Contains(findings[0].Fix, tc.avoid) {
+				t.Errorf("fix carries %q:\n%s", tc.avoid, findings[0].Fix)
+			}
+		})
 	}
 }
 

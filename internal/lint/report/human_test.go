@@ -44,12 +44,14 @@ func TestHumanRendersPositionCaretAndDetail(t *testing.T) {
 	source := "ALTER TABLE t DROP COLUMN c;\nCREATE INDEX i ON t (c);\n"
 
 	finding := rules.Finding{
-		RuleID:   "L001",
+		RuleID:   rules.L001,
 		Severity: rules.SeverityWarn,
 		Message:  "blocks writes",
-		Detail:   "SHARE on t",
+		Detail:   "SHARE on t (12 rows, 8.0 kB)",
+		Estimate: "estimated 2m to 5m",
 		File:     "m.sql",
 		Span:     rules.Span{Start: 29, End: 53, Line: 2},
+		Fix:      "-- +mig step: i\nCREATE INDEX CONCURRENTLY i ON t (c);\n",
 	}
 
 	var out strings.Builder
@@ -61,7 +63,9 @@ func TestHumanRendersPositionCaretAndDetail(t *testing.T) {
 	want := "m.sql:2: warn L001: blocks writes\n" +
 		"    CREATE INDEX i ON t (c);\n" +
 		"    ^\n" +
-		"    SHARE on t\n" +
+		"    SHARE on t (12 rows, 8.0 kB)\n" +
+		"    estimated 2m to 5m\n" +
+		"    a rewrite is available: mig lint --fix\n" +
 		"\n" +
 		"1 finding(s): 0 error(s), 1 warning(s)\n"
 
@@ -74,16 +78,16 @@ func TestHumanDegradesWithoutSource(t *testing.T) {
 	findings := []rules.Finding{
 		{
 			// No entry in sources, so no quoted line.
-			RuleID: "L010", Severity: rules.SeverityError, Message: "no", File: "gone.sql",
+			RuleID: rules.L010, Severity: rules.SeverityError, Message: "no", File: "gone.sql",
 			Span: rules.Span{Line: 3},
 		},
 		{
 			// An unlocated statement has no line to point at, and no detail.
-			RuleID: "L002", Severity: rules.SeverityInfo, Message: "hm", File: "m.sql",
+			RuleID: rules.L002, Severity: rules.SeverityInfo, Message: "hm", File: "m.sql",
 		},
 		{
 			// A finding on a final line that ends without a newline.
-			RuleID: "L001", Severity: rules.SeverityWarn, Message: "w", File: "m.sql",
+			RuleID: rules.L001, Severity: rules.SeverityWarn, Message: "w", File: "m.sql",
 			Span: rules.Span{Start: 0, End: 8, Line: 1},
 		},
 	}
@@ -126,7 +130,7 @@ func TestHumanStaysSilentWhenClean(t *testing.T) {
 }
 
 func TestHumanReportsitsSink(t *testing.T) {
-	findings := []rules.Finding{{RuleID: "L001", Severity: rules.SeverityWarn, Message: "w"}}
+	findings := []rules.Finding{{RuleID: rules.L001, Severity: rules.SeverityWarn, Message: "w"}}
 
 	if err := report.Human(failWriter{}, findings, nil); err == nil {
 		t.Error("a failed write went unreported")

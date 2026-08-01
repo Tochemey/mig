@@ -33,7 +33,7 @@ import (
 // every read of the view until the refresh finishes.
 type l011 struct{}
 
-func (l011) ID() string { return "L011" }
+func (l011) ID() string { return L011 }
 
 func (l011) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 	refresh := stmt.GetStmt().GetRefreshMatViewStmt()

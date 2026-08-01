@@ -135,9 +135,11 @@ func renderStep(step Step) (string, error) {
 	}
 
 	if step.Backfill != nil {
-		_, _ = fmt.Fprintf(out, "%s%s table=%s key=%s batch=%d\n",
+		_, _ = fmt.Fprintf(out, "%s%s %s=%s %s=%s %s=%d\n",
 			plan.AnnotationPrefix, plan.AnnotationBackfill,
-			step.Backfill.Table, step.Backfill.Key, step.Backfill.Batch)
+			plan.BackfillTable, step.Backfill.Table,
+			plan.BackfillKey, step.Backfill.Key,
+			plan.BackfillBatch, step.Backfill.Batch)
 
 		satisfied, err := deparse(step.Backfill.Satisfied)
 		if err != nil {

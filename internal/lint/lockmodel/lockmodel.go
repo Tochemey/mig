@@ -34,6 +34,38 @@
 // is checked against a live server, lock by lock, in test/lockmatrix.
 package lockmodel
 
+// The option names Postgres attaches to a statement's parse tree. They are
+// exported because the rule catalog reads the same trees: VACUUM FULL is the
+// lock model's business and L010's alike.
+const (
+	OptionFull         = "full"
+	OptionConcurrently = "concurrently"
+)
+
+const (
+	// Instant is catalog-only work, held for microseconds.
+	Instant DurationClass = iota + 1
+
+	// Scan is one full read of the rows.
+	Scan
+
+	// Rewrite is a full copy of the table: O(rows) writes plus the disk for a
+	// second copy.
+	Rewrite
+
+	// IndexBuild is O(rows log rows), and a concurrent build additionally
+	// waits out every open transaction, twice.
+	IndexBuild
+)
+
+// durationNames maps each class to its rendered form.
+var durationNames = map[DurationClass]string{
+	Instant:    "instant",
+	Scan:       "scan",
+	Rewrite:    "rewrite",
+	IndexBuild: "index build",
+}
+
 // LockMode is a Postgres table-level lock mode. The numeric values follow the
 // server's own lock levels, weakest to strongest, so ordering comparisons and
 // LOCK TABLE's parse tree agree with it.
@@ -132,30 +164,6 @@ func (m LockMode) BlocksWrites() bool {
 // DurationClass says how long a lock is held, as a function of the table
 // rather than of the moment.
 type DurationClass int
-
-const (
-	// Instant is catalog-only work, held for microseconds.
-	Instant DurationClass = iota + 1
-
-	// Scan is one full read of the rows.
-	Scan
-
-	// Rewrite is a full copy of the table: O(rows) writes plus the disk for a
-	// second copy.
-	Rewrite
-
-	// IndexBuild is O(rows log rows), and a concurrent build additionally
-	// waits out every open transaction, twice.
-	IndexBuild
-)
-
-// durationNames maps each class to its rendered form.
-var durationNames = map[DurationClass]string{
-	Instant:    "instant",
-	Scan:       "scan",
-	Rewrite:    "rewrite",
-	IndexBuild: "index build",
-}
 
 // String renders the duration class.
 func (d DurationClass) String() string {

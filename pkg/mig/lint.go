@@ -24,10 +24,14 @@
 package mig
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"io/fs"
 
 	"github.com/tochemey/mig/internal/lint"
 	"github.com/tochemey/mig/internal/lint/rules"
+	"github.com/tochemey/mig/internal/lint/stats"
 	"github.com/tochemey/mig/internal/plan"
 )
 
@@ -53,6 +57,13 @@ type LintReport struct {
 	// Sources maps each linted file to its contents, which is what a
 	// renderer needs to show the offending line.
 	Sources map[string]string
+
+	// Uncalibrated is what went wrong while measuring the server, empty when
+	// nothing did. Measuring needs a write, which a read-only standby will
+	// not give: the rest of connected mode works there and the findings
+	// simply carry no estimates, which is worth saying rather than silently
+	// dropping a number the reader was told to expect.
+	Uncalibrated string
 }
 
 // Errors counts the findings that should fail a build.
@@ -71,16 +82,85 @@ func (r *LintReport) Errors() int {
 // Lint checks every migration in fsys against the offline rule catalog,
 // without connecting to anything. The target version decides
 // version-sensitive behaviour, such as whether an added default rewrites.
+//
+// Offline, nothing here knows how large any table is, so every hazard whose
+// cost is the table's size stays a warning. [LintConnected] is the same
+// catalog with those sizes in hand.
 func Lint(fsys fs.FS, targetVersion int) (*LintReport, error) {
 	loaded, err := plan.LoadFS(fsys)
 	if err != nil {
 		return nil, err
 	}
 
-	findings, sources, err := lint.Run(fsys, loaded, targetVersion)
+	findings, sources, err := lint.Run(fsys, loaded, targetVersion, nil)
 	if err != nil {
 		return nil, err
 	}
 
 	return &LintReport{Findings: findings, Sources: sources}, nil
+}
+
+// LintConnected checks every migration with the live catalog in reach.
+//
+// The target version is the server's own, the severity of a size-dependent
+// hazard is the size of the table it names, and each such finding carries an
+// estimate of how long the work will hold its lock. Nothing is written: the
+// catalog is read, and the calibration probe builds a temporary table that
+// leaves with the session.
+func LintConnected(ctx context.Context, db *sql.DB, fsys fs.FS) (*LintReport, error) {
+	loaded, err := plan.LoadFS(fsys)
+	if err != nil {
+		return nil, err
+	}
+
+	major, err := stats.ServerMajor(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+
+	relations, err := lint.Relations(loaded, major)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshot, err := stats.Collect(ctx, db, relations)
+	if err != nil {
+		return nil, err
+	}
+
+	uncalibrated := ""
+	if err := calibrate(ctx, db, snapshot); err != nil {
+		uncalibrated = err.Error()
+	}
+
+	findings, sources, err := lint.Run(fsys, loaded, major, snapshot)
+	if err != nil {
+		return nil, err
+	}
+
+	return &LintReport{Findings: findings, Sources: sources, Uncalibrated: uncalibrated}, nil
+}
+
+// calibrate measures the server and hangs the result on the snapshot,
+// returning why it could not rather than failing the run: a standby refuses
+// the temporary table, and a report without estimates still carries every
+// finding and every size.
+func calibrate(ctx context.Context, db *sql.DB, snapshot *stats.Snapshot) (err error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		err = errors.Join(err, conn.Close())
+	}()
+
+	throughput, err := stats.Calibrate(ctx, conn)
+	if err != nil {
+		return err
+	}
+
+	snapshot.WithThroughput(throughput)
+
+	return nil
 }

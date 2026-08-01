@@ -38,6 +38,10 @@ import (
 )
 
 // shared is the container for this package, or nil when docker is absent.
+// sqlstateLockNotAvailable is lock_not_available, which is how a statement
+// that waited out its lock_timeout comes back.
+const sqlstateLockNotAvailable = "55P03"
+
 var shared *harness.Harness
 
 // TestMain brings up one container for the package.
@@ -259,7 +263,9 @@ func TestLockTimeoutIsEnforced(t *testing.T) {
 	}
 
 	defer func() {
-		_ = tx.Rollback()
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			t.Errorf("roll back the blocking transaction: %v", err)
+		}
 	}()
 
 	if _, err := tx.ExecContext(ctx, "LOCK TABLE users IN ACCESS EXCLUSIVE MODE"); err != nil {
@@ -286,7 +292,7 @@ func TestLockTimeoutIsEnforced(t *testing.T) {
 	_, err = victim.ExecContext(ctx, "ALTER TABLE users ADD COLUMN email text")
 
 	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "55P03" {
+	if !errors.As(err, &pgErr) || pgErr.Code != sqlstateLockNotAvailable {
 		t.Fatalf("blocked statement returned %v, want a lock timeout", err)
 	}
 }

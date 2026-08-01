@@ -26,6 +26,7 @@ package leaser_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -113,7 +114,9 @@ func TestRunReportsLocked(t *testing.T) {
 	holder := hold(t, database)
 
 	t.Cleanup(func() {
-		_ = holder.Release(context.Background())
+		if err := holder.Release(context.Background()); err != nil && !errors.Is(err, ledger.ErrFenced) {
+			t.Errorf("release the held lease: %v", err)
+		}
 	})
 
 	cfg := config(t, database, "locked-out")
@@ -138,7 +141,9 @@ func TestRunReportsAbandonedWait(t *testing.T) {
 	holder := hold(t, database)
 
 	t.Cleanup(func() {
-		_ = holder.Release(context.Background())
+		if err := holder.Release(context.Background()); err != nil && !errors.Is(err, ledger.ErrFenced) {
+			t.Errorf("release the held lease: %v", err)
+		}
 	})
 
 	cfg := config(t, database, "abandoned")

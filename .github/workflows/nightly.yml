@@ -59,3 +59,32 @@ jobs:
       # matrix should grow from evidence.
       - name: Fuzz
         run: go test ./test/kill/ -count=1 -run TestFuzz -timeout 85m -v
+
+  # The linter conditions its findings on the target version. Those conditions
+  # are about majors Postgres no longer supports, so they cannot be observed by
+  # the matrix that runs on the ones it does. Released behaviour does not
+  # change; this catches our own conditions drifting, which nightly is often
+  # enough for.
+  flip-matrix:
+    name: Version flips on the majors either side
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      MIG_FLIP_MATRIX: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache-dependency-path: go.sum
+
+      - run: go mod download
+      - name: Pull the Postgres images
+        run: |
+          for major in 10 11 12; do
+            docker pull "postgres:$major-alpine"
+          done
+
+      - name: Flip matrix
+        run: go test ./test/flipmatrix/ -count=1 -timeout 15m -v

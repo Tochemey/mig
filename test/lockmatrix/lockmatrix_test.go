@@ -25,44 +25,14 @@ package lockmatrix_test
 
 import (
 	"context"
-	"maps"
 	"os"
 	"slices"
-	"strconv"
 	"testing"
 
 	"github.com/tochemey/mig/internal/lint/lockmodel"
 	"github.com/tochemey/mig/test/harness"
 	"github.com/tochemey/mig/test/lockmatrix"
 )
-
-// shared is the container for this package, or nil when docker is absent.
-var shared *harness.Harness
-
-// major is the server's major version, which is what the model's predictions
-// are conditioned on.
-var major int
-
-// TestMain brings up one container for the package.
-func TestMain(m *testing.M) {
-	os.Exit(harness.Main(m, 0, func(ctx context.Context, h *harness.Harness) error {
-		shared = h
-
-		var raw string
-		if err := h.Admin().QueryRowContext(ctx, "SHOW server_version_num").Scan(&raw); err != nil {
-			return err
-		}
-
-		num, err := strconv.Atoi(raw)
-		if err != nil {
-			return err
-		}
-
-		major = num / 10000
-
-		return nil
-	}))
-}
 
 // seeded is the base fixture: one plain table with enough rows that a rewrite
 // writes real pages.
@@ -126,14 +96,16 @@ var matrix = []lockmatrix.Case{
 		SQL:  "ALTER TABLE t ADD COLUMN d int DEFAULT 42",
 	},
 	{
-		Name: "add_column_volatile_default",
-		Seed: seeded,
-		SQL:  "ALTER TABLE t ADD COLUMN d float8 DEFAULT random()",
+		Name:   "add_column_volatile_default",
+		Seed:   seeded,
+		SQL:    "ALTER TABLE t ADD COLUMN d float8 DEFAULT random()",
+		Visits: []string{"t"},
 	},
 	{
-		Name: "add_column_identity",
-		Seed: seeded,
-		SQL:  "ALTER TABLE t ADD COLUMN d bigint GENERATED ALWAYS AS IDENTITY",
+		Name:   "add_column_identity",
+		Seed:   seeded,
+		SQL:    "ALTER TABLE t ADD COLUMN d bigint GENERATED ALWAYS AS IDENTITY",
+		Visits: []string{"t"},
 	},
 	{
 		Name: "add_column_unique",
@@ -151,14 +123,16 @@ var matrix = []lockmatrix.Case{
 		SQL:  "ALTER TABLE t ALTER COLUMN c SET DEFAULT 0",
 	},
 	{
-		Name: "set_not_null",
-		Seed: seeded,
-		SQL:  "ALTER TABLE t ALTER COLUMN id SET NOT NULL",
+		Name:   "set_not_null",
+		Seed:   seeded,
+		SQL:    "ALTER TABLE t ALTER COLUMN id SET NOT NULL",
+		Visits: []string{"t"},
 	},
 	{
-		Name: "alter_column_type",
-		Seed: seeded,
-		SQL:  "ALTER TABLE t ALTER COLUMN id TYPE bigint",
+		Name:   "alter_column_type",
+		Seed:   seeded,
+		SQL:    "ALTER TABLE t ALTER COLUMN id TYPE bigint",
+		Visits: []string{"t"},
 	},
 	{
 		Name: "set_statistics",
@@ -171,9 +145,10 @@ var matrix = []lockmatrix.Case{
 		SQL:  "ALTER TABLE t SET (fillfactor = 70)",
 	},
 	{
-		Name: "add_check",
-		Seed: seeded,
-		SQL:  "ALTER TABLE t ADD CONSTRAINT ck CHECK (id > 0)",
+		Name:   "add_check",
+		Seed:   seeded,
+		SQL:    "ALTER TABLE t ADD CONSTRAINT ck CHECK (id > 0)",
+		Visits: []string{"t"},
 	},
 	{
 		Name: "add_check_not_valid",
@@ -184,7 +159,8 @@ var matrix = []lockmatrix.Case{
 		Name: "validate_constraint",
 		Seed: slices.Concat(seeded, []string{
 			"ALTER TABLE t ADD CONSTRAINT ck CHECK (id > 0) NOT VALID"}),
-		SQL: "ALTER TABLE t VALIDATE CONSTRAINT ck",
+		SQL:    "ALTER TABLE t VALIDATE CONSTRAINT ck",
+		Visits: []string{"t"},
 	},
 	{
 		Name: "add_foreign_key",
@@ -193,6 +169,7 @@ var matrix = []lockmatrix.Case{
 		Extra: map[string]lockmodel.LockMode{
 			"parent_pkey": lockmodel.AccessShare,
 		},
+		Visits: []string{"t"},
 	},
 	{
 		Name: "add_foreign_key_not_valid",
@@ -200,9 +177,10 @@ var matrix = []lockmatrix.Case{
 		SQL:  "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (c) REFERENCES parent (id) NOT VALID",
 	},
 	{
-		Name: "add_primary_key",
-		Seed: seeded,
-		SQL:  "ALTER TABLE t ADD CONSTRAINT t_pk PRIMARY KEY (id)",
+		Name:   "add_primary_key",
+		Seed:   seeded,
+		SQL:    "ALTER TABLE t ADD CONSTRAINT t_pk PRIMARY KEY (id)",
+		Visits: []string{"t"},
 	},
 	{
 		Name: "add_primary_key_using_index",
@@ -314,7 +292,8 @@ var matrix = []lockmatrix.Case{
 		Name: "attach_partition",
 		Seed: slices.Concat(withPartitions, []string{
 			"CREATE TABLE part2 (id int)"}),
-		SQL: "ALTER TABLE parted ATTACH PARTITION part2 FOR VALUES FROM (100) TO (200)",
+		SQL:    "ALTER TABLE parted ATTACH PARTITION part2 FOR VALUES FROM (100) TO (200)",
+		Visits: []string{"part2"},
 	},
 	{
 		Name: "detach_partition",
@@ -386,35 +365,21 @@ var matrix = []lockmatrix.Case{
 	},
 }
 
-// strongest folds an analysis into its strongest predicted mode per relation.
-// The fixtures never qualify a name, so the relation name alone is the key.
-func strongest(analysis lockmodel.Analysis) map[string]lockmodel.LockMode {
-	predicted := make(map[string]lockmodel.LockMode)
+// shared is the container for this package, or nil when docker is absent.
+var shared *harness.Harness
 
-	for _, effect := range analysis.Effects {
-		if effect.Mode > predicted[effect.Relation.Name] {
-			predicted[effect.Relation.Name] = effect.Mode
-		}
-	}
+// major is the server's major version, which is what the model's predictions
+// are conditioned on.
+var major int
 
-	return predicted
-}
+// TestMain brings up one container for the package.
+func TestMain(m *testing.M) {
+	os.Exit(harness.Main(m, 0, func(_ context.Context, h *harness.Harness) error {
+		shared = h
+		major = h.Major()
 
-// rewriteSet folds an analysis into the relations it predicts a rewrite for.
-func rewriteSet(analysis lockmodel.Analysis, extra []string) map[string]bool {
-	rewrites := make(map[string]bool)
-
-	for _, effect := range analysis.Effects {
-		if effect.Duration == lockmodel.Rewrite {
-			rewrites[effect.Relation.Name] = true
-		}
-	}
-
-	for _, name := range extra {
-		rewrites[name] = true
-	}
-
-	return rewrites
+		return nil
+	}))
 }
 
 // TestProbeFailures covers the probe's own refusals: a broken fixture, a
@@ -489,7 +454,8 @@ func TestProbeReportsAcceptedTransaction(t *testing.T) {
 }
 
 // TestLockMatrix holds every prediction to the server: the locks taken, the
-// refusal of transaction blocks, and whether the storage was rewritten.
+// refusal of transaction blocks, whether the storage was rewritten, and what
+// the server reported visiting.
 func TestLockMatrix(t *testing.T) {
 	if shared == nil {
 		t.Skip("docker unavailable")
@@ -497,57 +463,7 @@ func TestLockMatrix(t *testing.T) {
 
 	for _, c := range matrix {
 		t.Run(c.Name, func(t *testing.T) {
-			analysis, err := lockmodel.Analyze(c.SQL, major)
-			if err != nil {
-				t.Fatalf("Analyze(%q): %v", c.SQL, err)
-			}
-
-			if analysis.NoTx != c.Blocked {
-				t.Fatalf("NoTx = %v, but the case says blocked = %v", analysis.NoTx, c.Blocked)
-			}
-
-			observed, err := lockmatrix.Probe(t.Context(), shared, c)
-			if err != nil {
-				t.Fatalf("probe: %v", err)
-			}
-
-			if c.Blocked && !observed.RefusedTx {
-				t.Error("predicted notx, but the server accepted the statement in a transaction")
-			}
-
-			expected := strongest(analysis)
-			maps.Copy(expected, c.Extra)
-
-			// A blocked statement is caught at its first lock request, so
-			// only the locks seen have to match. A transactional statement
-			// holds everything at once and has to match exactly.
-			for name, mode := range observed.Locks {
-				if expected[name] != mode {
-					t.Errorf("observed %s on %q, predicted %s", mode, name, expected[name])
-				}
-			}
-
-			if !c.Blocked {
-				for name, mode := range expected {
-					if _, ok := observed.Locks[name]; !ok {
-						t.Errorf("predicted %s on %q, observed nothing", mode, name)
-					}
-				}
-			}
-
-			rewrites := rewriteSet(analysis, c.ExtraRewrites)
-
-			for name := range observed.Rewritten {
-				if !rewrites[name] {
-					t.Errorf("%q was rewritten, and no rewrite was predicted", name)
-				}
-			}
-
-			for name := range rewrites {
-				if !observed.Rewritten[name] {
-					t.Errorf("predicted a rewrite of %q, and none happened", name)
-				}
-			}
+			lockmatrix.Verify(t, shared, c, major)
 		})
 	}
 }

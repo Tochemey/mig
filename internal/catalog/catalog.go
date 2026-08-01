@@ -36,6 +36,45 @@ import (
 	"strings"
 )
 
+// indexQuery resolves a name through the search path, as the statement that
+// created it did, and returns nothing when no such index exists.
+const indexQuery = `
+SELECT i.indisvalid, i.indisready
+  FROM pg_index i
+  JOIN pg_class c ON c.oid = i.indexrelid
+ WHERE c.oid = to_regclass($1)`
+
+// columnQuery reports whether a column is present on a relation.
+//
+// attisdropped covers a column that was dropped: Postgres keeps the row and
+// marks it, so a plain name match would report a dropped column as present.
+// The attnum bound excludes the system columns every relation has.
+const columnQuery = `
+SELECT EXISTS (
+  SELECT 1
+    FROM pg_attribute
+   WHERE attrelid = to_regclass($1)
+     AND attname = $2
+     AND attnum > 0
+     AND NOT attisdropped)`
+
+const constraintQuery = `
+SELECT convalidated
+  FROM pg_constraint
+ WHERE conrelid = to_regclass($1) AND conname = $2`
+
+const relationQuery = `SELECT to_regclass($1) IS NOT NULL`
+
+// enumLabelQuery reports whether an enum carries a label. to_regtype resolves
+// the type through the search path, and yields nothing for a type that is not
+// there, which is an absent label rather than an error.
+const enumLabelQuery = `
+SELECT EXISTS (
+  SELECT 1
+    FROM pg_enum
+   WHERE enumtypid = to_regtype($1)
+     AND enumlabel = $2)`
+
 // Querier is the subset of database/sql shared by *sql.DB, *sql.Conn and
 // *sql.Tx. Step predicates run on a pinned connection; the fingerprint runs on
 // whatever the caller has.
@@ -60,14 +99,6 @@ type Index struct {
 func (i Index) Usable() bool {
 	return i.Exists && i.Valid && i.Ready
 }
-
-// indexQuery resolves a name through the search path, as the statement that
-// created it did, and returns nothing when no such index exists.
-const indexQuery = `
-SELECT i.indisvalid, i.indisready
-  FROM pg_index i
-  JOIN pg_class c ON c.oid = i.indexrelid
- WHERE c.oid = to_regclass($1)`
 
 // LookupIndex reads the state of an index. A name that resolves to nothing is
 // reported as absent rather than as an error.
@@ -106,20 +137,6 @@ func quoteIdent(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
-// columnQuery reports whether a column is present on a relation.
-//
-// attisdropped covers a column that was dropped: Postgres keeps the row and
-// marks it, so a plain name match would report a dropped column as present.
-// The attnum bound excludes the system columns every relation has.
-const columnQuery = `
-SELECT EXISTS (
-  SELECT 1
-    FROM pg_attribute
-   WHERE attrelid = to_regclass($1)
-     AND attname = $2
-     AND attnum > 0
-     AND NOT attisdropped)`
-
 // LookupColumn reports whether a column exists on a relation. A relation that
 // is not there has no columns rather than being an error.
 func LookupColumn(ctx context.Context, q Querier, schema, table, column string) (bool, error) {
@@ -144,11 +161,6 @@ type Constraint struct {
 	Validated bool
 }
 
-const constraintQuery = `
-SELECT convalidated
-  FROM pg_constraint
- WHERE conrelid = to_regclass($1) AND conname = $2`
-
 // LookupConstraint reads the state of a constraint on a relation.
 func LookupConstraint(ctx context.Context, q Querier, schema, table, name string) (Constraint, error) {
 	ident := QualifiedIdent(schema, table)
@@ -170,8 +182,6 @@ func LookupConstraint(ctx context.Context, q Querier, schema, table, name string
 	return constraint, nil
 }
 
-const relationQuery = `SELECT to_regclass($1) IS NOT NULL`
-
 // LookupRelation reports whether a relation exists.
 func LookupRelation(ctx context.Context, q Querier, schema, name string) (bool, error) {
 	ident := QualifiedIdent(schema, name)
@@ -184,16 +194,6 @@ func LookupRelation(ctx context.Context, q Querier, schema, name string) (bool, 
 
 	return exists, nil
 }
-
-// enumLabelQuery reports whether an enum carries a label. to_regtype resolves
-// the type through the search path, and yields nothing for a type that is not
-// there, which is an absent label rather than an error.
-const enumLabelQuery = `
-SELECT EXISTS (
-  SELECT 1
-    FROM pg_enum
-   WHERE enumtypid = to_regtype($1)
-     AND enumlabel = $2)`
 
 // LookupEnumLabel reports whether an enum type carries a label.
 func LookupEnumLabel(ctx context.Context, q Querier, schema, name, label string) (bool, error) {

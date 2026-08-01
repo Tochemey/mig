@@ -46,6 +46,10 @@ INSERT INTO users (id, name, legacy_email)
 SELECT g, 'user_' || g, 'user_' || g || '@example.test'
   FROM generate_series(1, $1) AS g`
 
+// forceDropSince is the first major with DROP DATABASE ... WITH (FORCE).
+// Before it, the sessions have to be sent away by hand.
+const forceDropSince = 13
+
 // templateDrainTimeout bounds the wait for the seeding connections to clear.
 // CREATE DATABASE ... TEMPLATE fails while any session is attached to the
 // template.
@@ -130,9 +134,30 @@ func (h *Harness) Clone(ctx context.Context, template string) (string, error) {
 // It is a no-op when the database does not exist.
 func (h *Harness) DropDatabase(ctx context.Context, name string) error {
 	//nolint:gosec // G201: identifiers cannot be bound as parameters; quoteIdent is the guard.
-	stmt := "DROP DATABASE IF EXISTS " + quoteIdent(name) + " WITH (FORCE)"
+	stmt := "DROP DATABASE IF EXISTS " + quoteIdent(name)
+
+	if h.major >= forceDropSince {
+		stmt += " WITH (FORCE)"
+	} else if err := h.evict(ctx, name); err != nil {
+		return err
+	}
+
 	if _, err := h.admin.ExecContext(ctx, stmt); err != nil {
 		return fmt.Errorf("drop database %q: %w", name, err)
+	}
+
+	return nil
+}
+
+// evict disconnects every session attached to a database, which is what
+// FORCE does on the majors that have it.
+func (h *Harness) evict(ctx context.Context, name string) error {
+	_, err := h.admin.ExecContext(ctx, `
+		SELECT pg_terminate_backend(pid)
+		  FROM pg_stat_activity
+		 WHERE datname = $1 AND pid <> pg_backend_pid()`, name)
+	if err != nil {
+		return fmt.Errorf("disconnect sessions on %q: %w", name, err)
 	}
 
 	return nil

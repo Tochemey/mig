@@ -140,6 +140,8 @@ func (p *Proxy) accept() {
 
 		server, err := net.Dial("tcp", p.target)
 		if err != nil {
+			// The client is dropped because there is nothing to proxy it to,
+			// and a failure to close it changes none of that.
 			_ = client.Close()
 
 			continue

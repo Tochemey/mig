@@ -29,6 +29,31 @@ import (
 	pgquery "github.com/pganalyze/pg_query_go/v6"
 )
 
+// serialTypes are the type names that mean "a sequence fills this column",
+// which is what makes ADD COLUMN of one a rewrite.
+var serialTypes = map[string]bool{
+	"serial":      true,
+	"bigserial":   true,
+	"smallserial": true,
+	"serial2":     true,
+	"serial4":     true,
+	"serial8":     true,
+}
+
+// nonVolatileFuncs are stable builtins the fast default path accepts,
+// evaluated once and stored. Only names that reach the walk as a function
+// call belong here; CURRENT_TIMESTAMP and its keyword siblings arrive as
+// SQLValueFunction nodes instead. Any function not listed is assumed
+// volatile, which errs towards predicting a rewrite.
+var nonVolatileFuncs = map[string]bool{
+	"now":                   true,
+	"transaction_timestamp": true,
+	"statement_timestamp":   true,
+	"current_setting":       true,
+	"current_schema":        true,
+	"current_database":      true,
+}
+
 // alterTable maps each ALTER TABLE action to its effects. A statement may
 // carry several actions; each contributes its own effect on the table, so a
 // caller reads the strongest of them as the statement's cost.
@@ -177,12 +202,7 @@ func serialType(name *pgquery.TypeName) bool {
 		last = part.GetString_().GetSval()
 	}
 
-	switch last {
-	case "serial", "bigserial", "smallserial", "serial2", "serial4", "serial8":
-		return true
-	default:
-		return false
-	}
+	return serialTypes[last]
 }
 
 // addConstraint classifies ADD CONSTRAINT by constraint type. NOT VALID
@@ -266,20 +286,6 @@ func detachPartition(parent Relation, cmd *pgquery.PartitionCmd) ([]LockEffect, 
 		{Relation: child, Mode: AccessExclusive, Duration: Instant,
 			Reason: "catalog only: detach partition"},
 	}, false
-}
-
-// nonVolatileFuncs are stable builtins the fast default path accepts,
-// evaluated once and stored. Only names that reach the walk as a function
-// call belong here; CURRENT_TIMESTAMP and its keyword siblings arrive as
-// SQLValueFunction nodes instead. Any function not listed is assumed
-// volatile, which errs towards predicting a rewrite.
-var nonVolatileFuncs = map[string]bool{
-	"now":                   true,
-	"transaction_timestamp": true,
-	"statement_timestamp":   true,
-	"current_setting":       true,
-	"current_schema":        true,
-	"current_database":      true,
 }
 
 // volatileExpr reports whether a default expression forces a per-row

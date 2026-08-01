@@ -35,7 +35,7 @@ import (
 // existing row while SHARE ROW EXCLUSIVE is held on both tables.
 type l006 struct{}
 
-func (l006) ID() string { return "L006" }
+func (l006) ID() string { return L006 }
 
 func (l006) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 	alter, cmds := alterCommands(stmt)
@@ -62,11 +62,11 @@ func (l006) Check(ctx Context, stmt *pgquery.RawStmt) []Finding {
 
 		parent := constraint.GetPktable()
 
-		found := finding(SeverityWarn, fmt.Sprintf(
+		found := sized(ctx, schema, name, fmt.Sprintf(
 			"ADD FOREIGN KEY validates every row of %s while blocking writes to both it and %s; "+
 				"add the key NOT VALID, then VALIDATE CONSTRAINT in its own step",
 			qualified(schema, name),
-			qualified(parent.GetSchemaname(), parent.GetRelname())), ctx)
+			qualified(parent.GetSchemaname(), parent.GetRelname())))
 
 		// An anonymous key gets its name from the server, so the validation
 		// step would have nothing to name; that fix stays unwritten.
