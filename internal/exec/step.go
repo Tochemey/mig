@@ -39,6 +39,51 @@ import (
 	"github.com/tochemey/mig/internal/throttle"
 )
 
+// The messages the executor's log records carry. The display in internal/cli
+// dispatches on them, so they are spelled once here: a message reworded on
+// one side only would stop rendering silently, and nothing would fail.
+const (
+	MsgStepRunning      = "step running"
+	MsgStepDone         = "step done"
+	MsgRepairing        = "repairing partial step"
+	MsgBackfillResuming = "backfill resuming"
+	MsgBackfillProgress = "backfill progress"
+)
+
+// The attribute keys on those records, read by the display and by anything
+// consuming the JSON logs.
+const (
+	AttrMigration  = "migration"
+	AttrStep       = "step"
+	AttrKind       = "kind"
+	AttrPosition   = "position"
+	AttrTotal      = "total"
+	AttrStatus     = "status"
+	AttrRepaired   = "repaired"
+	AttrError      = "error"
+	AttrDurationMS = "duration_ms"
+	AttrCursor     = "cursor"
+	AttrRows       = "rows"
+	AttrAttempts   = "attempts"
+)
+
+// The outcomes a closing record reports. A step that failed or succeeded is
+// in the ledger's vocabulary; a step the catalog already showed as done is
+// skipped, which the ledger has no state for because nothing was applied.
+const (
+	StatusFailed    = string(ledger.StatusFailed)
+	StatusSucceeded = string(ledger.StatusSucceeded)
+	StatusSkipped   = "skipped"
+)
+
+// setLocalLockTimeout bounds lock waits for one transaction.
+//
+// Batches run on the work pool rather than on a pinned connection, so the
+// timeout is set on the transaction instead of the session. Without it a batch
+// blocked on a row lock waits forever, and because Postgres orders lock
+// requests, every later query wanting that table queues behind it.
+const setLocalLockTimeout = "SELECT set_config('lock_timeout', $1, true)"
+
 // stepRun is one step's execution: what to run, where it runs, and what will be
 // reported about it.
 type stepRun struct {
@@ -78,12 +123,12 @@ func (e *Executor) runStep(ctx context.Context, migration plan.Migration, spec p
 	// One record per step whatever path it took, so the display and the JSON
 	// logs both account for everything the summary will list.
 	defer func() {
-		e.opts.Log.Info("step done",
-			"migration", migration.ID, "step", spec.Name, "kind", string(spec.Kind),
-			"position", position, "total", prog.total,
-			"status", doneStatus(run, err), "repaired", run.result.Repaired,
-			"attempts", run.result.Attempts,
-			"duration_ms", time.Since(run.started).Milliseconds())
+		e.opts.Log.Info(MsgStepDone,
+			AttrMigration, migration.ID, AttrStep, spec.Name, AttrKind, string(spec.Kind),
+			AttrPosition, position, AttrTotal, prog.total,
+			AttrStatus, doneStatus(run, err), AttrRepaired, run.result.Repaired,
+			AttrAttempts, run.result.Attempts,
+			AttrDurationMS, time.Since(run.started).Milliseconds())
 	}()
 
 	conn, err := e.connect(ctx, migration, spec)
@@ -113,9 +158,9 @@ func (e *Executor) runStep(ctx context.Context, migration plan.Migration, spec p
 
 	// Announced only once the catalog has said there is work, so a converged
 	// database renders as silence rather than as a list of steps not run.
-	e.opts.Log.Info("step running",
-		"migration", migration.ID, "step", spec.Name, "kind", string(spec.Kind),
-		"position", position, "total", prog.total)
+	e.opts.Log.Info(MsgStepRunning,
+		AttrMigration, migration.ID, AttrStep, spec.Name, AttrKind, string(spec.Kind),
+		AttrPosition, position, AttrTotal, prog.total)
 
 	switch applier := work.(type) {
 	case step.TxStep:
@@ -136,10 +181,10 @@ func (e *Executor) runStep(ctx context.Context, migration plan.Migration, spec p
 func doneStatus(run *stepRun, err error) string {
 	switch {
 	case err != nil:
-		return "failed"
+		return StatusFailed
 
 	case run.skipped:
-		return "skipped"
+		return StatusSkipped
 
 	default:
 		return run.result.Status
@@ -149,7 +194,7 @@ func doneStatus(run *stepRun, err error) string {
 // skip records a step whose work the catalog already shows as done.
 func (e *Executor) skip(ctx context.Context, run *stepRun, summary *Summary) error {
 	run.skipped = true
-	run.result.Status = string(ledger.StatusSucceeded)
+	run.result.Status = StatusSucceeded
 	summary.skip(run.result, run.started)
 
 	return e.succeed(ctx, run.key)
@@ -175,7 +220,7 @@ func (e *Executor) runTxStep(ctx context.Context, run *stepRun,
 		return err
 	case recorded.Status == ledger.StatusSucceeded:
 		run.skipped = true
-		run.result.Status = string(ledger.StatusSucceeded)
+		run.result.Status = StatusSucceeded
 		run.result.Attempts = recorded.Attempts
 		summary.skip(run.result, run.started)
 
@@ -192,7 +237,7 @@ func (e *Executor) runTxStep(ctx context.Context, run *stepRun,
 
 	crash.At(crash.AfterCommit)
 
-	run.result.Status = string(ledger.StatusSucceeded)
+	run.result.Status = StatusSucceeded
 	summary.apply(run.result, run.started)
 
 	return nil
@@ -286,7 +331,7 @@ func (e *Executor) runNoTxStep(ctx context.Context, run *stepRun,
 		return err
 	}
 
-	run.result.Status = string(ledger.StatusSucceeded)
+	run.result.Status = StatusSucceeded
 	summary.apply(run.result, run.started)
 
 	return e.succeed(ctx, run.key)
@@ -347,8 +392,8 @@ func (e *Executor) reconcile(ctx context.Context, key ledger.StepKey, work step.
 		return false, nil
 	}
 
-	e.opts.Log.Info("repairing partial step",
-		"step", key.String(), "kind", string(work.Meta().Kind), "attempts", recorded.Attempts)
+	e.opts.Log.Info(MsgRepairing,
+		AttrStep, key.String(), AttrKind, string(work.Meta().Kind), AttrAttempts, recorded.Attempts)
 
 	if err := work.Repair(ctx, conn); err != nil {
 		return false, e.fail(ctx, key, fmt.Errorf("repair step %s: %w", key, err))
@@ -386,7 +431,22 @@ func (e *Executor) beginAttempt(ctx context.Context, key ledger.StepKey) (int, e
 func (e *Executor) apply(ctx context.Context, key ledger.StepKey, work step.NoTxStep, conn *sql.Conn) error {
 	crash.At(crash.BeforeApply)
 
+	attempt := 0
+
 	run := func(ctx context.Context) error {
+		attempt++
+
+		// Every attempt after the first starts by clearing what the last one
+		// left. A CREATE INDEX CONCURRENTLY cancelled by the lock timeout
+		// leaves an invalid index behind, and running it again unrepaired
+		// finds its own leftovers rather than a clean table: the retry fails
+		// with "already exists" and the step never converges.
+		if attempt > 1 {
+			if err := work.Repair(ctx, conn); err != nil {
+				return fmt.Errorf("repair before retrying step %s: %w", key, err)
+			}
+		}
+
 		return work.Apply(ctx, conn)
 	}
 
@@ -477,12 +537,12 @@ func (e *Executor) runResumableStep(ctx context.Context, run *stepRun,
 			Lag:         throttle.Replication(e.control),
 		}),
 		Report: func(cursor step.Cursor) {
-			e.opts.Log.Info("backfill progress",
-				"step", run.key.String(), "cursor", cursor.Position, "rows", cursor.Rows)
+			e.opts.Log.Info(MsgBackfillProgress,
+				AttrStep, run.key.String(), AttrCursor, cursor.Position, AttrRows, cursor.Rows)
 		},
 		Resume: func(cursor step.Cursor) {
-			e.opts.Log.Info("backfill resuming",
-				"step", run.key.String(), "cursor", cursor.Position, "rows", cursor.Rows)
+			e.opts.Log.Info(MsgBackfillResuming,
+				AttrStep, run.key.String(), AttrCursor, cursor.Position, AttrRows, cursor.Rows)
 		},
 	}
 
@@ -502,19 +562,11 @@ func (e *Executor) runResumableStep(ctx context.Context, run *stepRun,
 		return e.fail(ctx, run.key, fmt.Errorf("step %s: %w", run.key, ErrPostconditionFailed))
 	}
 
-	run.result.Status = string(ledger.StatusSucceeded)
+	run.result.Status = StatusSucceeded
 	summary.apply(run.result, run.started)
 
 	return e.succeed(ctx, run.key)
 }
-
-// setLocalLockTimeout bounds lock waits for one transaction.
-//
-// Batches run on the work pool rather than on a pinned connection, so the
-// timeout is set on the transaction instead of the session. Without it a batch
-// blocked on a row lock waits forever, and because Postgres orders lock
-// requests, every later query wanting that table queues behind it.
-const setLocalLockTimeout = "SELECT set_config('lock_timeout', $1, true)"
 
 // beginFenced opens a transaction on the work pool with the lease fence already
 // asserted, so a batch cannot be written by a runner that has been superseded.

@@ -28,6 +28,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tochemey/mig/internal/ledger"
 	"github.com/tochemey/mig/pkg/mig"
 )
 
@@ -95,7 +96,7 @@ func TestStatusEmitsJSON(t *testing.T) {
 
 	step := reported[0]
 
-	if step.Name != "add_email" || step.Status != "succeeded" || step.Attempts != 1 {
+	if step.Name != "add_email" || step.Status != ledger.StatusSucceeded || step.Attempts != 1 {
 		t.Fatalf("step is %+v", step)
 	}
 }

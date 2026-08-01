@@ -39,8 +39,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -59,6 +61,11 @@ const DefaultImage = "postgres:18-alpine"
 // behaviour that only holds on one of them is a bug either way, and finding it
 // requires running the matrices on both.
 const EnvImage = "MIG_PG_IMAGE"
+
+// checkIntervalSince is the first major with client_connection_check_interval.
+// An older server refuses to start on an unknown setting, so the harness only
+// asks for it where it exists.
+const checkIntervalSince = 14
 
 const (
 	// adminDatabase is the maintenance database. Creating, cloning and dropping
@@ -79,6 +86,7 @@ type Harness struct {
 	base      *url.URL
 	admin     *sql.DB
 	binDir    string
+	major     int
 	seq       atomic.Uint64
 }
 
@@ -96,6 +104,51 @@ func WithImage(image string) Option {
 	}
 }
 
+// serverCommand builds the server's command line for an image. The settings
+// that hold everywhere come first; the ones a major may not have are added
+// once the tag says it does.
+func serverCommand(image string) []string {
+	command := []string{"postgres",
+		// Durability is worthless in a container that is discarded after
+		// the package, and expensive when seeding millions of rows.
+		"-c", "fsync=off",
+		"-c", "full_page_writes=off",
+		"-c", "synchronous_commit=off",
+		"-c", "max_connections=200",
+	}
+
+	if imageMajor(image) >= checkIntervalSince {
+		// Without this, a backend only notices its client died when it next
+		// writes to the socket. A backend blocked in a long CREATE INDEX
+		// CONCURRENTLY would outlive the kill and finish the index.
+		command = append(command, "-c", "client_connection_check_interval=100ms")
+	}
+
+	return command
+}
+
+// imageMajor reads the Postgres major out of an image tag, as in
+// "postgres:14-alpine". An image whose tag says nothing about the version is
+// taken to be current, since that is what a custom build normally is.
+func imageMajor(image string) int {
+	_, tag, ok := strings.Cut(image, ":")
+	if !ok {
+		return math.MaxInt
+	}
+
+	digits := tag
+	if index := strings.IndexFunc(tag, func(r rune) bool { return r < '0' || r > '9' }); index >= 0 {
+		digits = tag[:index]
+	}
+
+	major, err := strconv.Atoi(digits)
+	if err != nil {
+		return math.MaxInt
+	}
+
+	return major
+}
+
 // New starts a Postgres container and opens the maintenance connection.
 //
 // One container serves a whole test package; per-test isolation comes from
@@ -111,18 +164,7 @@ func New(ctx context.Context, opts ...Option) (*Harness, error) {
 		tcpostgres.WithDatabase(adminDatabase),
 		tcpostgres.WithUsername(pgRole),
 		tcpostgres.WithPassword(pgPassword),
-		testcontainers.WithCmd("postgres",
-			// Durability is worthless in a container that is discarded after
-			// the package, and expensive when seeding millions of rows.
-			"-c", "fsync=off",
-			"-c", "full_page_writes=off",
-			"-c", "synchronous_commit=off",
-			"-c", "max_connections=200",
-			// Without this, a backend only notices its client died when it next
-			// writes to the socket. A backend blocked in a long CREATE INDEX
-			// CONCURRENTLY would outlive the kill and finish the index.
-			"-c", "client_connection_check_interval=100ms",
-		),
+		testcontainers.WithCmd(serverCommand(cfg.image)...),
 		tcpostgres.BasicWaitStrategies(),
 	)
 	if err != nil {
@@ -155,7 +197,23 @@ func New(ctx context.Context, opts ...Option) (*Harness, error) {
 		return nil, h.abort(ctx, fmt.Errorf("ping maintenance connection: %w", err))
 	}
 
+	// The server's own account of its version, rather than the image tag's.
+	// Statements the harness itself runs are conditioned on it.
+	var version int
+
+	if err := admin.QueryRowContext(ctx, "SHOW server_version_num").Scan(&version); err != nil {
+		return nil, h.abort(ctx, fmt.Errorf("read server version: %w", err))
+	}
+
+	h.major = version / 10000
+
 	return h, nil
+}
+
+// Major is the Postgres major the container runs, for a test whose
+// expectations depend on it.
+func (h *Harness) Major() int {
+	return h.major
 }
 
 // DSN returns the connection string for a database inside the container.

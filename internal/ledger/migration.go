@@ -30,6 +30,18 @@ import (
 	"fmt"
 )
 
+// setMigrationStatusQuery returns a row only when the migration exists, so a
+// write against an unrecorded migration is reported rather than lost.
+const setMigrationStatusQuery = `
+UPDATE mig.migrations
+   SET status      = $2,
+       started_at  = CASE WHEN $2 = 'running' THEN now() ELSE started_at END,
+       finished_at = CASE WHEN $2 IN ('succeeded', 'failed') THEN now() ELSE finished_at END
+ WHERE id = $1
+RETURNING id`
+
+const loadMigrationQuery = `SELECT id, name, status FROM mig.migrations WHERE id = $1`
+
 // Status is the recorded state of a migration or a step. It is diagnostic:
 // whether work is required is decided from the catalog.
 type Status string
@@ -74,16 +86,6 @@ func UpsertMigration(ctx context.Context, tx *sql.Tx, id, name string) error {
 	return nil
 }
 
-// setMigrationStatusQuery returns a row only when the migration exists, so a
-// write against an unrecorded migration is reported rather than lost.
-const setMigrationStatusQuery = `
-UPDATE mig.migrations
-   SET status      = $2,
-       started_at  = CASE WHEN $2 = 'running' THEN now() ELSE started_at END,
-       finished_at = CASE WHEN $2 IN ('succeeded', 'failed') THEN now() ELSE finished_at END
- WHERE id = $1
-RETURNING id`
-
 // SetMigrationStatus records a migration's status. It must be called inside a
 // fenced transaction.
 func SetMigrationStatus(ctx context.Context, tx *sql.Tx, id string, status Status) error {
@@ -101,8 +103,6 @@ func SetMigrationStatus(ctx context.Context, tx *sql.Tx, id string, status Statu
 
 	return nil
 }
-
-const loadMigrationQuery = `SELECT id, name, status FROM mig.migrations WHERE id = $1`
 
 // LoadMigration reads a migration's ledger row, returning [ErrNotRecorded]
 // when there is none. Reads are not fenced; only writes need to be.

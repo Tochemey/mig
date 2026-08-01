@@ -1,0 +1,17 @@
+{
+  "findings": [
+    {
+      "rule": "L005",
+      "severity": "warn",
+      "message": "SET NOT NULL scans orders under ACCESS EXCLUSIVE to verify \"ref\"; add CHECK (ref IS NOT NULL) NOT VALID, validate it, then set NOT NULL",
+      "detail": "ACCESS EXCLUSIVE on orders, held for a full scan; blocks reads and writes",
+      "file": "1_l005_pre12.sql",
+      "step": "the_check_cannot_skip_the_scan_before_12",
+      "span": {
+        "start": 241,
+        "end": 289,
+        "line": 8
+      }
+    }
+  ]
+}

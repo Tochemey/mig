@@ -1,0 +1,16 @@
+{
+  "findings": [
+    {
+      "rule": "L002",
+      "severity": "error",
+      "message": "this statement refuses to run inside a transaction block; mark the step notx",
+      "file": "1_l002_pre12.sql",
+      "step": "enum_in_tx",
+      "span": {
+        "start": 25,
+        "end": 55,
+        "line": 2
+      }
+    }
+  ]
+}

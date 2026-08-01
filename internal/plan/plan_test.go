@@ -24,6 +24,7 @@
 package plan_test
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
 	"os"
@@ -667,5 +668,116 @@ func TestLoadIgnoresNonMigrationEntries(t *testing.T) {
 
 	if len(loaded.Migrations) != 1 {
 		t.Fatalf("got %d migrations, want 1", len(loaded.Migrations))
+	}
+}
+
+// TestLoadCarriesLintDirectivesWithoutReadingThem covers the annotation the
+// linter owns. The loader has to accept it wherever it sits, and one standing
+// above the first step must not open an empty step in front of it.
+func TestLoadCarriesLintDirectivesWithoutReadingThem(t *testing.T) {
+	dir := write(t, map[string]string{
+		"20240817120000_index.sql": `
+-- +mig lint:ignore L010 reason="this schema is rebuilt nightly"
+-- +mig step: index_email
+-- +mig lint:ignore L001 reason="the table has twelve rows"
+CREATE INDEX idx_users_email ON users (email);
+`,
+	})
+
+	loaded, err := plan.Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	steps := loaded.Migrations[0].Steps
+	if len(steps) != 1 || steps[0].Name != "index_email" {
+		t.Fatalf("loaded %d steps: %+v", len(steps), steps)
+	}
+}
+
+// TestLintDirectivesLeaveTheChecksumAlone is why the suppression is spelled
+// as an annotation rather than as a plain comment: silencing a rule on a
+// migration that has already run must not make the executor call it drift.
+func TestLintDirectivesLeaveTheChecksumAlone(t *testing.T) {
+	statement := "CREATE INDEX idx_users_email ON users (email);\n"
+
+	before := write(t, map[string]string{
+		"20240817120000_index.sql": "-- +mig step: index_email\n" + statement,
+	})
+
+	after := write(t, map[string]string{
+		"20240817120000_index.sql": "-- +mig step: index_email\n" +
+			"-- +mig lint:ignore L001 reason=\"the table has twelve rows\"\n" + statement,
+	})
+
+	plain, err := plan.Load(before)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	silenced, err := plan.Load(after)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	if !bytes.Equal(plain.Migrations[0].Steps[0].Checksum, silenced.Migrations[0].Steps[0].Checksum) {
+		t.Error("adding a lint directive changed the step's checksum")
+	}
+}
+
+// TestLoadRejectsAMisspeltLintDirective covers the recognition boundary: the
+// loader waves through the annotation it knows and nothing that merely starts
+// like it, so a typo cannot silently drop a suppression.
+func TestLoadRejectsAMisspeltLintDirective(t *testing.T) {
+	dir := write(t, map[string]string{
+		"20240817120000_index.sql": `
+-- +mig step: index_email
+-- +mig lint:ignoreL001 reason="a misspelling"
+CREATE INDEX idx_users_email ON users (email);
+`,
+	})
+
+	if _, err := plan.Load(dir); !errors.Is(err, plan.ErrUnknownAnnotation) {
+		t.Fatalf("err = %v, want an unknown annotation", err)
+	}
+}
+
+// TestAnnotationRecognisers covers the two spellings the linter shares with
+// the loader, on the lines the loader itself never offers them: a plain
+// comment and a bare statement.
+func TestAnnotationRecognisers(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		step string
+		lint string
+	}{
+		{
+			name: "a step annotation",
+			line: "-- +mig step: index_email",
+			step: "index_email",
+		},
+		{
+			name: "a lint directive",
+			line: `-- +mig lint:ignore L001 reason="twelve rows"`,
+			lint: `L001 reason="twelve rows"`,
+		},
+		{name: "a plain comment", line: "-- step: index_email"},
+		{name: "a statement", line: "CREATE INDEX i ON t (c);"},
+		{name: "another annotation", line: "-- +mig notx"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			name, isStep := plan.StepOf(tc.line)
+			if isStep != (tc.step != "") || name != tc.step {
+				t.Errorf("StepOf = %q, %v, want %q", name, isStep, tc.step)
+			}
+
+			body, isLint := plan.LintIgnoreOf(tc.line)
+			if isLint != (tc.lint != "") || body != tc.lint {
+				t.Errorf("LintIgnoreOf = %q, %v, want %q", body, isLint, tc.lint)
+			}
+		})
 	}
 }

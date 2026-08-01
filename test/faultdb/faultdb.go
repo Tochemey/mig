@@ -45,6 +45,9 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
+// names records the driver names already registered.
+var names sync.Map
+
 // Op is a driver operation a fault can be attached to.
 type Op string
 
@@ -126,9 +129,6 @@ func (f *Faults) check(op Op, query string) error {
 
 	return nil
 }
-
-// names records the driver names already registered.
-var names sync.Map
 
 // Open registers a fault-injecting driver and connects through it.
 //

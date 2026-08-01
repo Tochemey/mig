@@ -43,23 +43,6 @@ import (
 	"github.com/tochemey/mig/test/harness"
 )
 
-// shared is the container for this package, or nil when docker is absent.
-var shared *harness.Harness
-
-// seedRows is enough rows for the fixture backfill to take several batches.
-const seedRows = 5
-
-// TestMain brings up one container for the package.
-//
-// The template is seeded, because a backfill over an empty table finishes
-// before it opens a single batch and would leave that whole path unrun.
-func TestMain(m *testing.M) {
-	os.Exit(harness.Main(m, seedRows, func(_ context.Context, h *harness.Harness) error {
-		shared = h
-		return nil
-	}))
-}
-
 // One step of each kind: transactional, concurrent, and batched. Between them
 // they take every branch the executor has.
 var migrations = fstest.MapFS{
@@ -77,6 +60,23 @@ var migrations = fstest.MapFS{
 			"(SELECT 1 FROM users WHERE email IS NULL))\n" +
 			"UPDATE users SET email = id || '@example.test'\n" +
 			" WHERE id BETWEEN :cursor_lo AND :cursor_hi AND email IS NULL;\n")},
+}
+
+// shared is the container for this package, or nil when docker is absent.
+var shared *harness.Harness
+
+// seedRows is enough rows for the fixture backfill to take several batches.
+const seedRows = 5
+
+// TestMain brings up one container for the package.
+//
+// The template is seeded, because a backfill over an empty table finishes
+// before it opens a single batch and would leave that whole path unrun.
+func TestMain(m *testing.M) {
+	os.Exit(harness.Main(m, seedRows, func(_ context.Context, h *harness.Harness) error {
+		shared = h
+		return nil
+	}))
 }
 
 // The executor is driven directly here rather than through the command, because
@@ -171,13 +171,13 @@ func TestRunLogsEveryStepTransition(t *testing.T) {
 	}
 
 	for i, record := range done {
-		if record["position"] != int64(i+1) || record["total"] != int64(3) {
+		if record[exec.AttrPosition] != int64(i+1) || record[exec.AttrTotal] != int64(3) {
 			t.Fatalf("record %d is numbered %v/%v, want %d/3",
-				i, record["position"], record["total"], i+1)
+				i, record[exec.AttrPosition], record[exec.AttrTotal], i+1)
 		}
 
-		if record["status"] != "succeeded" {
-			t.Fatalf("record %d has status %q, want succeeded", i, record["status"])
+		if record[exec.AttrStatus] != exec.StatusSucceeded {
+			t.Fatalf("record %d has status %q, want succeeded", i, record[exec.AttrStatus])
 		}
 	}
 
@@ -191,13 +191,13 @@ func TestRunLogsEveryStepTransition(t *testing.T) {
 		t.Fatalf("second run: %v", err)
 	}
 
-	if got := second.count("step running"); got != 0 {
+	if got := second.count(exec.MsgStepRunning); got != 0 {
 		t.Fatalf("the second run announced %d steps, want none", got)
 	}
 
-	for i, record := range second.byMessage("step done") {
-		if record["status"] != "skipped" {
-			t.Fatalf("second-run record %d has status %q, want skipped", i, record["status"])
+	for i, record := range second.byMessage(exec.MsgStepDone) {
+		if record[exec.AttrStatus] != exec.StatusSkipped {
+			t.Fatalf("second-run record %d has status %q, want skipped", i, record[exec.AttrStatus])
 		}
 	}
 }

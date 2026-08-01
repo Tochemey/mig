@@ -51,7 +51,7 @@ func main() {
 
 	// Unbuffered, so a SIGKILL cannot swallow a marker a test is waiting on.
 	out := func(line string) {
-		fmt.Fprintln(os.Stdout, line)
+		_, _ = fmt.Fprintln(os.Stdout, line)
 	}
 
 	os.Exit(leaser.Run(context.Background(), cfg, out))

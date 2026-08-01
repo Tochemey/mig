@@ -40,6 +40,10 @@ import (
 	"github.com/tochemey/mig/test/leaser"
 )
 
+// templateRows is enough rows that a concurrent index build takes long enough
+// to be killed part-way through, and few enough to keep the suite quick.
+const templateRows = 100_000
+
 const (
 	leaserPkg = "github.com/tochemey/mig/test/leaser/cmd/leaser"
 	migPkg    = "github.com/tochemey/mig/cmd/mig"
@@ -78,10 +82,6 @@ func TestMain(m *testing.M) {
 		return nil
 	}))
 }
-
-// templateRows is enough rows that a concurrent index build takes long enough
-// to be killed part-way through, and few enough to keep the suite quick.
-const templateRows = 100_000
 
 // TestL1ExactlyOneRunnerApplies covers --on-locked=fail: several runners start
 // together, exactly one gets in, and the others exit cleanly.

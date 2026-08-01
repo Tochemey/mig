@@ -43,6 +43,16 @@ import (
 	"github.com/tochemey/mig/test/harness"
 )
 
+// migration is a single transactional step, which needs no concurrency to
+// exercise the command end to end.
+const migration = `-- +mig step: add_email
+ALTER TABLE users ADD COLUMN email text;
+`
+
+// errWrite is what a closed pipe returns, which is what stdout becomes when the
+// reader on the other end goes away.
+var errWrite = errors.New("write failed")
+
 // shared is the container for this package, or nil when docker is absent.
 var shared *harness.Harness
 
@@ -53,12 +63,6 @@ func TestMain(m *testing.M) {
 		return nil
 	}))
 }
-
-// migration is a single transactional step, which needs no concurrency to
-// exercise the command end to end.
-const migration = `-- +mig step: add_email
-ALTER TABLE users ADD COLUMN email text;
-`
 
 // TestExitCode covers the mapping the process exits with.
 func TestExitCode(t *testing.T) {
@@ -172,10 +176,6 @@ func TestEnvironmentSuppliesTheLeaseTTL(t *testing.T) {
 		})
 	}
 }
-
-// errWrite is what a closed pipe returns, which is what stdout becomes when the
-// reader on the other end goes away.
-var errWrite = errors.New("write failed")
 
 // brokenWriter fails every write, standing in for a closed stdout.
 type brokenWriter struct{}

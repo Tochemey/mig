@@ -1,0 +1,30 @@
+{
+  "findings": [
+    {
+      "rule": "L021",
+      "severity": "warn",
+      "message": "flagged runs a full scan of users alongside 2 other statements, whose locks are held for the whole of it; give the long one its own step",
+      "detail": "SHARE UPDATE EXCLUSIVE on users, held for a full scan; blocks no traffic",
+      "file": "1_l021.sql",
+      "step": "flagged",
+      "span": {
+        "start": 22,
+        "end": 78,
+        "line": 2
+      }
+    },
+    {
+      "rule": "L021",
+      "severity": "warn",
+      "message": "flagged_pair runs a full scan of shipments alongside 1 other statement, whose locks are held for the whole of it; give the long one its own step",
+      "detail": "SHARE UPDATE EXCLUSIVE on shipments, held for a full scan; blocks no traffic",
+      "file": "1_l021.sql",
+      "step": "flagged_pair",
+      "span": {
+        "start": 190,
+        "end": 254,
+        "line": 7
+      }
+    }
+  ]
+}

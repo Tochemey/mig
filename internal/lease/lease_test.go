@@ -81,7 +81,9 @@ func TestAcquireFailsWhenHeld(t *testing.T) {
 	}
 
 	t.Cleanup(func() {
-		_ = first.Release(context.Background())
+		if err := first.Release(context.Background()); err != nil && !errors.Is(err, ledger.ErrFenced) {
+			t.Errorf("release the held lease: %v", err)
+		}
 	})
 
 	if _, err := lease.Acquire(ctx, db, config(t, lease.Fail)); !errors.Is(err, lease.ErrLocked) {

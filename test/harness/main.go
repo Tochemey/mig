@@ -85,7 +85,9 @@ func Main(m *testing.M, rows int, setup func(context.Context, *Harness) error) i
 	}
 
 	defer func() {
-		_ = os.RemoveAll(binDir)
+		if err := os.RemoveAll(binDir); err != nil {
+			log.Printf("harness: remove %s: %v", binDir, err)
+		}
 	}()
 
 	h.binDir = binDir

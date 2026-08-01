@@ -1,0 +1,30 @@
+{
+  "findings": [
+    {
+      "rule": "L020",
+      "severity": "warn",
+      "message": "flagged_recreation holds ACCESS EXCLUSIVE on counters and users at once, each until the step commits; give each table its own step so the windows do not overlap",
+      "detail": "ACCESS EXCLUSIVE on users, held for catalog work only; blocks reads and writes",
+      "file": "1_blockable.sql",
+      "step": "flagged_recreation",
+      "span": {
+        "start": 293,
+        "end": 331,
+        "line": 11
+      }
+    },
+    {
+      "rule": "L030",
+      "severity": "warn",
+      "message": "dropping counters: any code still reading it fails the moment this commits, and the rows do not come back. Ship the release that stops referencing it first",
+      "detail": "ACCESS EXCLUSIVE on counters, held for catalog work only; blocks reads and writes",
+      "file": "1_blockable.sql",
+      "step": "flagged_recreation",
+      "span": {
+        "start": 333,
+        "end": 352,
+        "line": 12
+      }
+    }
+  ]
+}

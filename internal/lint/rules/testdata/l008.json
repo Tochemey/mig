@@ -1,0 +1,31 @@
+{
+  "findings": [
+    {
+      "rule": "L008",
+      "severity": "warn",
+      "message": "ADD PRIMARY KEY builds its index while blocking all access to users; build a unique index concurrently first and adopt it with USING INDEX",
+      "detail": "ACCESS EXCLUSIVE on users, held for an index build; blocks reads and writes",
+      "file": "1_l008.sql",
+      "step": "flagged",
+      "span": {
+        "start": 22,
+        "end": 80,
+        "line": 2
+      },
+      "fix": "-- +mig step: index_users_pk\n-- +mig notx\n-- the expensive build runs concurrently, blocking nothing\nCREATE UNIQUE INDEX CONCURRENTLY users_pk ON users USING btree (id);\n\n-- +mig step: adopt_users_pk\n-- adoption is catalog work, but verifying NOT NULL still scans; on a large table set each key column NOT NULL via a validated check first\nALTER TABLE users ADD CONSTRAINT users_pk PRIMARY KEY USING INDEX users_pk;\n"
+    },
+    {
+      "rule": "L008",
+      "severity": "warn",
+      "message": "ADD PRIMARY KEY builds its index while blocking all access to orders; build a unique index concurrently first and adopt it with USING INDEX",
+      "detail": "ACCESS EXCLUSIVE on orders, held for an index build; blocks reads and writes",
+      "file": "1_l008.sql",
+      "step": "inline_flagged",
+      "span": {
+        "start": 112,
+        "end": 164,
+        "line": 5
+      }
+    }
+  ]
+}

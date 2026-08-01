@@ -1,0 +1,30 @@
+{
+  "findings": [
+    {
+      "rule": "L002",
+      "severity": "error",
+      "message": "this statement refuses to run inside a transaction block; mark the step notx",
+      "detail": "SHARE UPDATE EXCLUSIVE on users, held for an index build; blocks no traffic",
+      "file": "1_l002.sql",
+      "step": "concurrently_in_tx",
+      "span": {
+        "start": 33,
+        "end": 91,
+        "line": 2
+      }
+    },
+    {
+      "rule": "L002",
+      "severity": "error",
+      "message": "this statement refuses to run inside a transaction block; mark the step notx",
+      "detail": "SHARE UPDATE EXCLUSIVE on users, held for a full scan; blocks no traffic",
+      "file": "1_l002.sql",
+      "step": "vacuum_in_tx",
+      "span": {
+        "start": 121,
+        "end": 133,
+        "line": 5
+      }
+    }
+  ]
+}

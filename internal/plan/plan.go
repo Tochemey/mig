@@ -43,6 +43,9 @@ import (
 	"github.com/tochemey/mig/internal/step"
 )
 
+// ErrKindUnsupported reports a step kind this build cannot execute.
+var ErrKindUnsupported = errors.New("step kind not supported yet")
+
 // Extension is the suffix of a migration file.
 const Extension = ".sql"
 
@@ -138,9 +141,6 @@ func (s Step) Check() *predicate.Check {
 
 	return predicate.Infer(s.Statements)
 }
-
-// ErrKindUnsupported reports a step kind this build cannot execute.
-var ErrKindUnsupported = errors.New("step kind not supported yet")
 
 // Migration is one migration file.
 type Migration struct {

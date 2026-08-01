@@ -1,1 +1,5 @@
-*.go text eol=lf
+# Every text file is checked out with LF endings on every platform. The lint
+# golden fixtures carry byte offsets into their .sql sources and are compared
+# byte for byte, so a checkout that rewrites newlines shifts every span and
+# fails the suite, which is what autocrlf did on the Windows runner.
+* text=auto eol=lf

@@ -51,12 +51,12 @@ func TestLifecycleAgainstOlderPostgres(t *testing.T) {
 
 	var version string
 	if err := older.Admin().QueryRowContext(ctx, "SHOW server_version").Scan(&version); err != nil {
-		_ = older.Close(context.Background())
+		closeHarness(t, older)
 		t.Fatalf("read server version: %v", err)
 	}
 
 	if !strings.HasPrefix(version, "16") {
-		_ = older.Close(context.Background())
+		closeHarness(t, older)
 		t.Fatalf("server version is %q, want 16.x", version)
 	}
 
@@ -75,7 +75,7 @@ func TestNewRejectsUnknownImage(t *testing.T) {
 
 	h, err := harness.New(ctx, harness.WithImage("mig-no-such-image:0"))
 	if err == nil {
-		_ = h.Close(context.Background())
+		closeHarness(t, h)
 		t.Fatal("New accepted an image that does not exist")
 	}
 }
@@ -323,5 +323,16 @@ func TestBackendString(t *testing.T) {
 
 	if !strings.Contains(got, "pid=42") {
 		t.Fatalf("backend renders as %q", got)
+	}
+}
+
+// closeHarness shuts a container down on the way to a failure, reporting a
+// refusal rather than leaking it: the fatal that follows is the finding, and
+// a container left running is the next test's problem.
+func closeHarness(t *testing.T, h *harness.Harness) {
+	t.Helper()
+
+	if err := h.Close(context.Background()); err != nil {
+		t.Errorf("close the harness: %v", err)
 	}
 }

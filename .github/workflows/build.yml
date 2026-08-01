@@ -104,6 +104,41 @@ jobs:
         run: docker pull postgres:18-alpine
       - run: make test
 
+  # What Windows can be held to. The shipped code builds and its unit tests
+  # run; the container suite does not, because the harness drives the migrator
+  # as a POSIX process group and this runner has no Linux docker. The package
+  # list is computed rather than written down, so a package that later grows a
+  # container test drops out of this job by itself instead of breaking it.
+  windows:
+    name: Build and unit tests on Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          check-latest: false
+          cache-dependency-path: go.sum
+
+      - name: Check the C toolchain cgo needs
+        run: gcc --version
+
+      - run: go mod download
+      - name: Build the shipped code
+        run: go build ./cmd/... ./internal/... ./pkg/...
+
+      - name: Unit tests
+        run: |
+          units=$(for p in $(go list ./cmd/... ./internal/... ./pkg/...); do
+            go list -test -deps "$p" | grep -q 'test/harness' || echo "$p"
+          done)
+          echo "$units"
+          go test -count=1 $units
+
   # Recovery behaviour for a concurrently-built index is version-sensitive, so
   # the matrices have to pass on more than the one major the harness defaults
   # to. This job runs them against the previous one.
@@ -130,3 +165,11 @@ jobs:
         run: docker pull "$MIG_PG_IMAGE"
       - name: Recovery and lease matrices
         run: go test ./test/... ./internal/lease/... ./internal/step/... -count=1 -timeout 30m
+
+      # A step of its own, after the rest: the linter's duration estimates are
+      # held to a measured rewrite, and a measurement taken while the other
+      # packages are running reports the load rather than the model.
+      - name: Estimate acceptance
+        env:
+          MIG_ESTIMATE: "1"
+        run: go test ./test/estimate/ -count=1 -timeout 15m -v

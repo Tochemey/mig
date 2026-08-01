@@ -40,17 +40,6 @@ import (
 	"github.com/tochemey/mig/test/harness"
 )
 
-// shared is the container for this package, or nil when docker is absent.
-var shared *harness.Harness
-
-// TestMain brings up one container for the package.
-func TestMain(m *testing.M) {
-	os.Exit(harness.Main(m, 0, func(_ context.Context, h *harness.Harness) error {
-		shared = h
-		return nil
-	}))
-}
-
 // The directory an adopting repository already has: sequential versions, one
 // file each, contents untouched by the import.
 var adopted = fstest.MapFS{
@@ -60,6 +49,17 @@ var adopted = fstest.MapFS{
 		"ALTER TABLE users ADD COLUMN email text;\n")},
 	"10_add_phone.sql": &fstest.MapFile{Data: []byte(
 		"ALTER TABLE users ADD COLUMN phone text;\n")},
+}
+
+// shared is the container for this package, or nil when docker is absent.
+var shared *harness.Harness
+
+// TestMain brings up one container for the package.
+func TestMain(m *testing.M) {
+	os.Exit(harness.Main(m, 0, func(_ context.Context, h *harness.Harness) error {
+		shared = h
+		return nil
+	}))
 }
 
 // TestGooseHistoryIsAdopted covers the path that matters: what goose applied is

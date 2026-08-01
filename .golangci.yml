@@ -14,6 +14,7 @@ output:
 linters:
   default: none
   enable:
+    - errcheck
     - gocyclo
     - gosec
     - misspell
@@ -93,6 +94,16 @@ linters:
         - honoured
         - honours
         - honouring
+        # analyse
+        - analyse
+        - analysed
+        - analyses
+        - analysing
+        # recognise (negative form)
+        - unrecognised
+        # model (double-l British past/gerund)
+        - modelled
+        - modelling
         # randomise
         - randomise
         - randomised

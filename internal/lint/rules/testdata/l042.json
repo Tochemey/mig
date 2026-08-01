@@ -1,0 +1,31 @@
+{
+  "findings": [
+    {
+      "rule": "L042",
+      "severity": "info",
+      "message": "this step replaces the inferred predicate, which checks that idx_users_email is valid and ready, with one that does not mention indisvalid: an interrupted build leaves an invalid index, and a predicate that only finds it reports the wreckage as done. Drop the -- +mig satisfied: line and let it be inferred",
+      "detail": "SHARE UPDATE EXCLUSIVE on users, held for an index build; blocks no traffic",
+      "file": "1_l042.sql",
+      "step": "flagged",
+      "span": {
+        "start": 109,
+        "end": 167,
+        "line": 4
+      },
+      "fix": "-- +mig step: flagged\n-- +mig notx\n-- the executor infers the predicate, and its version knows an interrupted build leaves an invalid index\nCREATE INDEX CONCURRENTLY idx_users_email ON users USING btree (email);\n"
+    },
+    {
+      "rule": "L001",
+      "severity": "warn",
+      "message": "CREATE INDEX without CONCURRENTLY blocks writes to users for the whole build; add CONCURRENTLY and mark the step notx",
+      "detail": "SHARE on users, held for an index build; blocks writes",
+      "file": "1_l042.sql",
+      "step": "a_plain_build_is_another_rules_business",
+      "span": {
+        "start": 672,
+        "end": 717,
+        "line": 17
+      }
+    }
+  ]
+}

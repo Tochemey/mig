@@ -30,6 +30,47 @@ import (
 	"fmt"
 )
 
+// jsonNull is what the checkpoint column holds when a null was written into
+// it, which is not the same as no row at all.
+const jsonNull = "null"
+
+const upsertStepQuery = `
+INSERT INTO mig.steps (migration_id, idx, name, kind, checksum, status)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (migration_id, idx) DO UPDATE
+   SET name = excluded.name, kind = excluded.kind`
+
+const setStepStatusQuery = `
+UPDATE mig.steps
+   SET status      = $3,
+       error       = $4,
+       started_at  = CASE WHEN $3 = 'running' THEN now() ELSE started_at END,
+       finished_at = CASE WHEN $3 IN ('succeeded', 'failed') THEN now() ELSE finished_at END
+ WHERE migration_id = $1 AND idx = $2
+RETURNING idx`
+
+const incrementAttemptsQuery = `
+UPDATE mig.steps
+   SET attempts = attempts + 1
+ WHERE migration_id = $1 AND idx = $2
+RETURNING attempts`
+
+const loadStepQuery = `
+SELECT name, kind, checksum, status, attempts, coalesce(error, '')
+  FROM mig.steps
+ WHERE migration_id = $1 AND idx = $2`
+
+const setCheckpointQuery = `
+UPDATE mig.steps
+   SET checkpoint = $3
+ WHERE migration_id = $1 AND idx = $2
+RETURNING idx`
+
+const loadCheckpointQuery = `
+SELECT coalesce(checkpoint, 'null'::jsonb)
+  FROM mig.steps
+ WHERE migration_id = $1 AND idx = $2`
+
 // StepKey identifies a step within a migration.
 type StepKey struct {
 	MigrationID string
@@ -61,12 +102,6 @@ func (s Step) Attempted() bool {
 	return s.Attempts > 0 || s.Status == StatusRunning || s.Status == StatusFailed
 }
 
-const upsertStepQuery = `
-INSERT INTO mig.steps (migration_id, idx, name, kind, checksum, status)
-VALUES ($1, $2, $3, $4, $5, $6)
-ON CONFLICT (migration_id, idx) DO UPDATE
-   SET name = excluded.name, kind = excluded.kind`
-
 // UpsertStep records a step as pending without disturbing the progress of one
 // already recorded. It must be called inside a fenced transaction.
 //
@@ -82,15 +117,6 @@ func UpsertStep(ctx context.Context, tx *sql.Tx, key StepKey, name, kind string,
 
 	return nil
 }
-
-const setStepStatusQuery = `
-UPDATE mig.steps
-   SET status      = $3,
-       error       = $4,
-       started_at  = CASE WHEN $3 = 'running' THEN now() ELSE started_at END,
-       finished_at = CASE WHEN $3 IN ('succeeded', 'failed') THEN now() ELSE finished_at END
- WHERE migration_id = $1 AND idx = $2
-RETURNING idx`
 
 // SetStepStatus records a step's status, and its error when it failed. It must
 // be called inside a fenced transaction.
@@ -109,12 +135,6 @@ func SetStepStatus(ctx context.Context, tx *sql.Tx, key StepKey, status Status, 
 
 	return nil
 }
-
-const incrementAttemptsQuery = `
-UPDATE mig.steps
-   SET attempts = attempts + 1
- WHERE migration_id = $1 AND idx = $2
-RETURNING attempts`
 
 // IncrementAttempts records that a runner is about to do the work, and returns
 // the new count. It must be called inside a fenced transaction.
@@ -137,11 +157,6 @@ func IncrementAttempts(ctx context.Context, tx *sql.Tx, key StepKey) (int, error
 	return attempts, nil
 }
 
-const loadStepQuery = `
-SELECT name, kind, checksum, status, attempts, coalesce(error, '')
-  FROM mig.steps
- WHERE migration_id = $1 AND idx = $2`
-
 // LoadStep reads a step's ledger row, returning [ErrNotRecorded] when there is
 // none.
 func LoadStep(ctx context.Context, db *sql.DB, key StepKey) (Step, error) {
@@ -160,12 +175,6 @@ func LoadStep(ctx context.Context, db *sql.DB, key StepKey) (Step, error) {
 
 	return step, nil
 }
-
-const setCheckpointQuery = `
-UPDATE mig.steps
-   SET checkpoint = $3
- WHERE migration_id = $1 AND idx = $2
-RETURNING idx`
 
 // SetCheckpoint records a resumable step's progress. It must be called inside
 // the transaction that performs the work the progress describes.
@@ -189,11 +198,6 @@ func SetCheckpoint(ctx context.Context, tx *sql.Tx, key StepKey, state []byte) e
 	return nil
 }
 
-const loadCheckpointQuery = `
-SELECT coalesce(checkpoint, 'null'::jsonb)
-  FROM mig.steps
- WHERE migration_id = $1 AND idx = $2`
-
 // LoadCheckpoint reads a resumable step's progress, returning nil when it has
 // none yet.
 func LoadCheckpoint(ctx context.Context, db *sql.DB, key StepKey) ([]byte, error) {
@@ -209,7 +213,7 @@ func LoadCheckpoint(ctx context.Context, db *sql.DB, key StepKey) ([]byte, error
 		return nil, fmt.Errorf("load checkpoint of step %s: %w", key, err)
 	}
 
-	if string(state) == "null" {
+	if string(state) == jsonNull {
 		return nil, nil
 	}
 

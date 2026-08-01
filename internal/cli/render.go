@@ -33,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tochemey/mig/internal/exec"
 	"github.com/tochemey/mig/internal/step"
 )
 
@@ -53,6 +54,12 @@ const spinnerInterval = 120 * time.Millisecond
 //
 // On a terminal the current step animates in place with its elapsed time.
 // Anywhere else, lines are only appended, so a CI log stays readable.
+//
+// Every write here discards its error explicitly. A [slog.Handler] method
+// that fails has nowhere to report to but the sink that just refused it, and
+// a migration is not going to be abandoned because a progress line did not
+// print. What must not be lost is reported through the summary, which is
+// written by the command and checked.
 type renderer struct {
 	mu      sync.Mutex
 	out     io.Writer
@@ -119,23 +126,24 @@ func (r *renderer) Handle(_ context.Context, rec slog.Record) error {
 	defer r.mu.Unlock()
 
 	switch rec.Message {
-	case "step running":
+	case exec.MsgStepRunning:
 		r.begin(fmt.Sprintf("[%d/%d] %s",
-			attrs["position"].Int64(), attrs["total"].Int64(), attrs["step"].String()))
+			attrs[exec.AttrPosition].Int64(), attrs[exec.AttrTotal].Int64(),
+			attrs[exec.AttrStep].String()))
 
-	case "repairing partial step":
-		r.annotate(describeRepair(attrs["kind"].String()))
+	case exec.MsgRepairing:
+		r.annotate(describeRepair(attrs[exec.AttrKind].String()))
 
-	case "backfill resuming":
-		r.annotate("resuming from id=" + grouped(attrs["cursor"].Int64()))
+	case exec.MsgBackfillResuming:
+		r.annotate("resuming from id=" + grouped(attrs[exec.AttrCursor].Int64()))
 
-	case "backfill progress":
+	case exec.MsgBackfillProgress:
 		r.progress(fmt.Sprintf("id=%s (%s rows)",
-			grouped(attrs["cursor"].Int64()), grouped(attrs["rows"].Int64())))
+			grouped(attrs[exec.AttrCursor].Int64()), grouped(attrs[exec.AttrRows].Int64())))
 
-	case "step done":
-		r.finish(attrs["status"].String(),
-			time.Duration(attrs["duration_ms"].Int64())*time.Millisecond)
+	case exec.MsgStepDone:
+		r.finish(attrs[exec.AttrStatus].String(),
+			time.Duration(attrs[exec.AttrDurationMS].Int64())*time.Millisecond)
 
 	default:
 		// Anything else at warning strength is shown; the rest belongs to the
@@ -184,7 +192,7 @@ func (r *renderer) annotate(note string) {
 	}
 
 	r.flushHeader()
-	fmt.Fprintf(r.out, "      %s\n", note)
+	_, _ = fmt.Fprintf(r.out, "      %s\n", note)
 }
 
 // progress updates the transient text beside the spinner. It never reaches an
@@ -208,14 +216,14 @@ func (r *renderer) finish(status string, elapsed time.Duration) {
 	r.active = false
 
 	// A skipped step renders as nothing: the display shows what the run did.
-	if status == "skipped" {
+	if status == exec.StatusSkipped {
 		r.clearLine()
 
 		return
 	}
 
 	mark := "✓"
-	if status == "failed" {
+	if status == exec.StatusFailed {
 		mark = "✗"
 	}
 
@@ -228,7 +236,7 @@ func (r *renderer) finish(status string, elapsed time.Duration) {
 
 	if r.tty {
 		r.clearLine()
-		fmt.Fprintln(r.out, line)
+		_, _ = fmt.Fprintln(r.out, line)
 
 		return
 	}
@@ -236,12 +244,12 @@ func (r *renderer) finish(status string, elapsed time.Duration) {
 	// The header already has its own line when an annotation forced it out;
 	// only the outcome is left to print.
 	if r.flushed {
-		fmt.Fprintf(r.out, "      %s %s\n", mark, fmtDuration(elapsed))
+		_, _ = fmt.Fprintf(r.out, "      %s %s\n", mark, fmtDuration(elapsed))
 
 		return
 	}
 
-	fmt.Fprintln(r.out, line)
+	_, _ = fmt.Fprintln(r.out, line)
 }
 
 // warn surfaces a record the run should not finish without a person seeing.
@@ -251,11 +259,11 @@ func (r *renderer) warn(msg string, attrs map[string]slog.Value) {
 	}
 
 	line := "  ! " + msg
-	if s, ok := attrs["step"]; ok {
+	if s, ok := attrs[exec.AttrStep]; ok {
 		line += " (" + s.String() + ")"
 	}
 
-	fmt.Fprintln(r.out, line)
+	_, _ = fmt.Fprintln(r.out, line)
 
 	if r.tty && r.active {
 		r.draw()
@@ -269,7 +277,7 @@ func (r *renderer) flushHeader() {
 	}
 
 	r.flushed = true
-	fmt.Fprintf(r.out, "  %s\n", r.header)
+	_, _ = fmt.Fprintf(r.out, "  %s\n", r.header)
 }
 
 // draw repaints the in-place line on a terminal.
@@ -286,13 +294,13 @@ func (r *renderer) draw() {
 
 	frame := spinnerFrames[r.frame%len(spinnerFrames)]
 
-	fmt.Fprintf(r.out, "\r\x1b[2K%s   %c %s", line, frame, fmtDuration(time.Since(r.started)))
+	_, _ = fmt.Fprintf(r.out, "\r\x1b[2K%s   %c %s", line, frame, fmtDuration(time.Since(r.started)))
 }
 
 // clearLine erases the in-place line on a terminal.
 func (r *renderer) clearLine() {
 	if r.tty {
-		fmt.Fprint(r.out, "\r\x1b[2K")
+		_, _ = fmt.Fprint(r.out, "\r\x1b[2K")
 	}
 }
 

@@ -35,6 +35,9 @@ import (
 	"github.com/tochemey/mig/test/harness"
 )
 
+// heldFence is the fence a test takes so its writes are allowed through.
+const heldFence int64 = 1
+
 // shared is the container for this package, or nil when docker is absent.
 var shared *harness.Harness
 
@@ -46,9 +49,6 @@ func TestMain(m *testing.M) {
 		return nil
 	}))
 }
-
-// heldFence is the fence a test takes so its writes are allowed through.
-const heldFence int64 = 1
 
 // TestEnsureSchemaIsIdempotent covers the first thing every run does: the
 // schema is created on demand and re-creating it must be a no-op.

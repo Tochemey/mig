@@ -82,6 +82,7 @@ func New() *cobra.Command {
 
 	root.AddCommand(newUpCommand())
 	root.AddCommand(newPlanCommand())
+	root.AddCommand(newLintCommand())
 	root.AddCommand(newVerifyCommand())
 	root.AddCommand(newStatusCommand())
 	root.AddCommand(newImportCommand())

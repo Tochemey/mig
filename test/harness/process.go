@@ -239,7 +239,8 @@ func (p *Process) Cleanup() {
 	}
 
 	// SIGKILL terminates a child even while it is stopped, so a frozen process
-	// needs no SIGCONT first.
+	// needs no SIGCONT first. The child may also have exited between the check
+	// above and here, and a signal to a dead process is the outcome wanted.
 	_ = p.Kill()
 
 	<-p.done

@@ -1,0 +1,401 @@
+// MIT License
+//
+// Copyright (c) 2026 Arsene Tochemey Gandote
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+
+package lint_test
+
+import (
+	"strings"
+	"testing"
+	"testing/fstest"
+
+	"github.com/tochemey/mig/internal/lint"
+	"github.com/tochemey/mig/internal/lint/lockmodel"
+	"github.com/tochemey/mig/internal/lint/policy"
+	"github.com/tochemey/mig/internal/lint/rules"
+	"github.com/tochemey/mig/internal/lint/stats"
+	"github.com/tochemey/mig/internal/parse"
+	"github.com/tochemey/mig/internal/plan"
+)
+
+// current is the target version the tests run at.
+const current = 18
+
+// load reads a plan out of an in-memory directory.
+func load(t *testing.T, fsys fstest.MapFS) *plan.Plan {
+	t.Helper()
+
+	loaded, err := plan.LoadFS(fsys)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	return loaded
+}
+
+// TestRunOrdersAndLocatesFindings covers the pipeline end to end: findings
+// sorted by file, position and rule, spans pointing at the statement text,
+// and every linted file's contents handed back for rendering.
+func TestRunOrdersAndLocatesFindings(t *testing.T) {
+	// Two statements one file apart pin the position tiebreak; the second
+	// trips a different rule, so rule order cannot stand in for it.
+	first := "-- +mig step: one\nCREATE INDEX i ON t (c);\n\n" +
+		"-- +mig step: compact\n-- +mig notx\nVACUUM FULL t;\n"
+
+	// One statement tripping two rules pins the rule-id tiebreak on an
+	// identical span.
+	second := "-- +mig step: two\n" +
+		"ALTER TABLE t ADD COLUMN h text UNIQUE DEFAULT gen_random_uuid()::text;\n"
+
+	fsys := fstest.MapFS{
+		"1_a.sql": &fstest.MapFile{Data: []byte(first)},
+		"2_b.sql": &fstest.MapFile{Data: []byte(second)},
+	}
+
+	result, err := lint.Run(fsys, load(t, fsys), current, nil, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	findings, sources := result.Findings, result.Sources
+
+	got := make([]string, 0, len(findings))
+
+	for _, f := range findings {
+		got = append(got, f.File+"/"+f.RuleID)
+	}
+
+	want := []string{"1_a.sql/L001", "1_a.sql/L010", "2_b.sql/L003", "2_b.sql/L009"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("findings = %v, want %v", got, want)
+	}
+
+	if sources["1_a.sql"] != first || sources["2_b.sql"] != second {
+		t.Error("sources do not carry the linted files' contents")
+	}
+
+	index := findings[0]
+
+	if index.Span.Line != 2 || index.Step != "one" {
+		t.Errorf("finding located at line %d step %q, want line 2 step one",
+			index.Span.Line, index.Step)
+	}
+
+	// The loader splits statements without their terminating semicolon, so
+	// the span stops before it too.
+	if text := first[index.Span.Start:index.Span.End]; text != "CREATE INDEX i ON t (c)" {
+		t.Errorf("span covers %q, not the statement", text)
+	}
+
+	if findings[2].Span != findings[3].Span {
+		t.Error("two findings on one statement should share its span")
+	}
+}
+
+// TestRelationsNamesEveryTableOnce covers what connected mode reads the
+// catalog about: every relation the statements touch, the implicit ones
+// included, each named once however often it appears.
+func TestRelationsNamesEveryTableOnce(t *testing.T) {
+	body := "-- +mig step: one\nCREATE INDEX i ON users (email);\n\n" +
+		"-- +mig step: two\n" +
+		"ALTER TABLE orders ADD CONSTRAINT orders_fk FOREIGN KEY (uid) REFERENCES users (id);\n\n" +
+		"-- +mig step: three\nALTER TABLE app.orders ADD COLUMN note text;\n"
+
+	fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(body)}}
+
+	relations, err := lint.Relations(load(t, fsys), current)
+	if err != nil {
+		t.Fatalf("relations: %v", err)
+	}
+
+	got := make([]string, 0, len(relations))
+	for _, relation := range relations {
+		got = append(got, relation.String())
+	}
+
+	// users arrives from the index and again as the key's referenced side,
+	// and is listed once; orders qualified is not orders bare.
+	want := "users orders app.orders"
+	if strings.Join(got, " ") != want {
+		t.Errorf("relations = %v, want %s", got, want)
+	}
+}
+
+// TestRelationsRejectsHandBuiltPlans covers the parse failure, which only a
+// plan that did not come from the loader can produce.
+func TestRelationsRejectsHandBuiltPlans(t *testing.T) {
+	p := &plan.Plan{Migrations: []plan.Migration{{
+		File:  "x.sql",
+		Steps: []plan.Step{{Name: "s", Statements: []parse.Statement{{SQL: "NOT SQL"}}}},
+	}}}
+
+	if _, err := lint.Relations(p, current); err == nil {
+		t.Error("an unparsable statement named relations")
+	}
+}
+
+// TestRunLeavesRewrittenStatementsUnlocated covers a backfill body, whose
+// cursor placeholders were rewritten after loading and so cannot be found
+// verbatim in the file.
+func TestRunLeavesRewrittenStatementsUnlocated(t *testing.T) {
+	body := "-- +mig step: fill\n" +
+		"-- +mig backfill: table=t key=id\n" +
+		"-- +mig satisfied: sql(SELECT true)\n" +
+		"UPDATE t SET c = 1 WHERE id > :cursor_lo AND id <= :cursor_hi;\n"
+
+	fsys := fstest.MapFS{"1_fill.sql": &fstest.MapFile{Data: []byte(body)}}
+
+	result, err := lint.Run(fsys, load(t, fsys), current, nil, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	findings := result.Findings
+
+	if len(findings) != 0 {
+		t.Fatalf("a chunked backfill was flagged: %+v", findings)
+	}
+}
+
+// TestRunStripsFixesOnSharedSteps pins the application boundary: a fix
+// replaces its whole step, so a statement sharing a step keeps the finding
+// and loses the fix.
+func TestRunStripsFixesOnSharedSteps(t *testing.T) {
+	shared := "-- +mig step: both\n" +
+		"ALTER TABLE t ALTER COLUMN c SET NOT NULL;\n" +
+		"SELECT 1;\n"
+
+	alone := "-- +mig step: one\n" +
+		"ALTER TABLE t ALTER COLUMN c SET NOT NULL;\n"
+
+	fsys := fstest.MapFS{
+		"1_shared.sql": &fstest.MapFile{Data: []byte(shared)},
+		"2_alone.sql":  &fstest.MapFile{Data: []byte(alone)},
+	}
+
+	result, err := lint.Run(fsys, load(t, fsys), current, nil, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	findings := result.Findings
+
+	if len(findings) != 2 {
+		t.Fatalf("found %d findings, want 2: %+v", len(findings), findings)
+	}
+
+	if findings[0].Fix != "" {
+		t.Error("a statement sharing its step kept a fix")
+	}
+
+	if findings[1].Fix == "" {
+		t.Error("a statement alone in its step lost its fix")
+	}
+}
+
+// TestRunRejectsHandBuiltPlans covers the failures only a plan that did not
+// come from the loader can produce.
+func TestRunRejectsHandBuiltPlans(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		want string
+	}{
+		{name: "unparsable statement", sql: "NOT SQL", want: "parse statement"},
+		{name: "two statements in one", sql: "SELECT 1; SELECT 2", want: "expected one statement"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &plan.Plan{Migrations: []plan.Migration{{
+				File:  "x.sql",
+				Steps: []plan.Step{{Name: "s", Statements: []parse.Statement{{SQL: tc.sql}}}},
+			}}}
+
+			fsys := fstest.MapFS{"x.sql": &fstest.MapFile{Data: []byte(tc.sql)}}
+
+			_, err := lint.Run(fsys, p, current, nil, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+
+	t.Run("missing file", func(t *testing.T) {
+		p := &plan.Plan{Migrations: []plan.Migration{{File: "gone.sql"}}}
+
+		_, err := lint.Run(fstest.MapFS{}, p, current, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "read migration") {
+			t.Errorf("err = %v, want a read failure", err)
+		}
+	})
+}
+
+// ruleIDs is what a comparison of findings reads.
+func ruleIDs(findings []rules.Finding) []string {
+	ids := make([]string, 0, len(findings))
+
+	for _, finding := range findings {
+		ids = append(ids, finding.RuleID)
+	}
+
+	return ids
+}
+
+// TestRunHonoursSuppressions covers the scope of a directive: it silences the
+// step it sits in, and a directive above the first step silences the file.
+func TestRunHonoursSuppressions(t *testing.T) {
+	cases := []struct {
+		name      string
+		directive string
+		want      []string
+	}{
+		{
+			name:      "no directive",
+			directive: "",
+			want:      []string{"L001", "L001"},
+		},
+		{
+			name:      "inside a step",
+			directive: "-- +mig step: one\n-- +mig lint:ignore L001 reason=\"twelve rows\"\n",
+			want:      []string{"L001"},
+		},
+		{
+			name:      "above the first step",
+			directive: "-- +mig lint:ignore L001 reason=\"twelve rows\"\n-- +mig step: one\n",
+			want:      nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opening := tc.directive
+			if opening == "" {
+				opening = "-- +mig step: one\n"
+			}
+
+			body := opening + "CREATE INDEX i ON t (c);\n\n" +
+				"-- +mig step: two\nCREATE INDEX j ON t (d);\n"
+
+			fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(body)}}
+
+			result, err := lint.Run(fsys, load(t, fsys), current, nil, nil)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+
+			if got := ruleIDs(result.Findings); strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Errorf("findings = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunMarksTheDirectivesThatSilencedSomething covers what the audit reads:
+// a directive that no longer suppresses anything is the one to look at.
+func TestRunMarksTheDirectivesThatSilencedSomething(t *testing.T) {
+	body := "-- +mig step: one\n" +
+		"-- +mig lint:ignore L001 reason=\"twelve rows\"\n" +
+		"-- +mig lint:ignore L010 reason=\"nothing here vacuums\"\n" +
+		"CREATE INDEX i ON t (c);\n"
+
+	fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(body)}}
+
+	result, err := lint.Run(fsys, load(t, fsys), current, nil, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(result.Suppressions) != 2 {
+		t.Fatalf("carried %d directives, want 2", len(result.Suppressions))
+	}
+
+	if !result.Suppressions[0].Used {
+		t.Error("the directive that silenced the index build reads as unused")
+	}
+
+	if result.Suppressions[1].Used {
+		t.Error("a directive that silenced nothing reads as used")
+	}
+}
+
+// TestRunReportsDirectivesItCannotHonour covers the design's rule that a
+// suppression without a reason is a lint error of its own: the finding it was
+// meant to silence stands, and the directive is reported beside it.
+func TestRunReportsDirectivesItCannotHonour(t *testing.T) {
+	body := "-- +mig step: one\n-- +mig lint:ignore L001\nCREATE INDEX i ON t (c);\n"
+
+	fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(body)}}
+
+	result, err := lint.Run(fsys, load(t, fsys), current, nil, nil)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if got := ruleIDs(result.Findings); strings.Join(got, " ") != "L000 L001" {
+		t.Fatalf("findings = %v, want the directive's complaint and the finding it did not silence", got)
+	}
+
+	broken := result.Findings[0]
+
+	if broken.Severity != rules.SeverityError || !strings.Contains(broken.Message, "gives no reason") {
+		t.Errorf("the complaint reads %+v", broken)
+	}
+
+	if broken.Span.Line != 2 || broken.Step != "one" {
+		t.Errorf("the complaint is placed at line %d step %q", broken.Span.Line, broken.Step)
+	}
+}
+
+// TestRunAppliesThePolicy covers both halves of what a policy decides: the
+// severity a rule carries, and the sizes a size-dependent hazard is graded by.
+func TestRunAppliesThePolicy(t *testing.T) {
+	body := "-- +mig step: one\nCREATE INDEX i ON t (c);\n\n" +
+		"-- +mig step: two\nALTER TABLE t ALTER COLUMN c TYPE bigint;\n"
+
+	fsys := fstest.MapFS{"1_m.sql": &fstest.MapFile{Data: []byte(body)}}
+
+	// A table of twenty thousand rows: a warning by the catalog's own
+	// thresholds, and an outage by the ones this policy sets.
+	snapshot := stats.Of(map[lockmodel.Relation]stats.Table{
+		{Name: "t"}: {Exists: true, Rows: 20_000, Bytes: 16 << 20},
+	})
+
+	pol, err := policy.Parse([]byte("rules:\n  L001: off\nthresholds:\n  big_rows: 10000\n"), "migrations")
+	if err != nil {
+		t.Fatalf("parse policy: %v", err)
+	}
+
+	result, err := lint.Run(fsys, load(t, fsys), current, snapshot, pol)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if got := ruleIDs(result.Findings); strings.Join(got, " ") != "L004" {
+		t.Fatalf("findings = %v, want the type change alone", got)
+	}
+
+	if result.Findings[0].Severity != rules.SeverityError {
+		t.Errorf("severity = %s, want the policy's threshold to make it an error",
+			result.Findings[0].Severity)
+	}
+}

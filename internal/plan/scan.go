@@ -29,21 +29,52 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/tochemey/mig/internal/parse"
 	"github.com/tochemey/mig/internal/step"
 )
 
-// prefix marks a line as an annotation rather than SQL or a comment.
-const prefix = "-- +mig "
+// AnnotationPrefix marks a line as an annotation rather than SQL or a
+// comment. It is exported with the annotation names below so that code
+// generating or recognising the format, such as the linter's fix engine,
+// shares one spelling with the loader.
+const AnnotationPrefix = "-- +mig "
 
 // The annotations.
 const (
-	annStep          = "step:"
-	annNoTx          = "notx"
-	annBackfill      = "backfill:"
-	annSatisfied     = "satisfied:"
-	annNoLockTimeout = "no_lock_timeout"
+	// AnnotationStep opens a step.
+	AnnotationStep = "step:"
+
+	// AnnotationNoTx marks a step that runs outside a transaction.
+	AnnotationNoTx = "notx"
+
+	// AnnotationBackfill marks a batched backfill step.
+	AnnotationBackfill = "backfill:"
+
+	// AnnotationSatisfied carries an author-supplied predicate.
+	AnnotationSatisfied = "satisfied:"
+
+	// AnnotationNoLockTimeout drops the default lock timeout for a step. The
+	// linter names it in the finding that asks for it back.
+	AnnotationNoLockTimeout = "no_lock_timeout"
+
+	// AnnotationLintIgnore suppresses one lint rule. The loader accepts it
+	// and does nothing with it: it is addressed to the linter. It is spelled
+	// as an annotation rather than as a plain comment so that silencing a
+	// rule on a migration that has already run leaves its checksum alone,
+	// annotations being no part of a step's SQL.
+	AnnotationLintIgnore = "lint:ignore"
+)
+
+// The fields of a backfill annotation. They are exported with the annotation
+// names above so that the linter's fix engine writes the same spellings the
+// loader reads back.
+const (
+	BackfillTable  = "table"
+	BackfillKey    = "key"
+	BackfillBatch  = "batch"
+	BackfillMaxLag = "max_lag_bytes"
 )
 
 // The placeholders a backfill's SQL uses for the range its batch covers. They
@@ -137,11 +168,18 @@ func scan(content string) ([]Step, error) {
 			continue
 		}
 
-		if name, isStep := strings.CutPrefix(annotation, annStep); isStep {
-			if err := begin(strings.TrimSpace(name)); err != nil {
+		if name, isStep := StepOf(line); isStep {
+			if err := begin(name); err != nil {
 				return nil, err
 			}
 
+			continue
+		}
+
+		// A lint directive is skipped before a step is opened for it, so one
+		// standing above the first step: line addresses the file rather than
+		// opening an empty step in front of it.
+		if _, isLint := LintIgnoreOf(line); isLint {
 			continue
 		}
 
@@ -171,7 +209,7 @@ func scan(content string) ([]Step, error) {
 func annotationOf(line string) (string, bool) {
 	trimmed := strings.TrimSpace(line)
 
-	body, ok := strings.CutPrefix(trimmed, strings.TrimSpace(prefix))
+	body, ok := strings.CutPrefix(trimmed, strings.TrimSpace(AnnotationPrefix))
 	if !ok {
 		return "", false
 	}
@@ -179,23 +217,68 @@ func annotationOf(line string) (string, bool) {
 	return strings.TrimSpace(body), true
 }
 
+// StepOf returns the name a step annotation opens, and whether the line is
+// one. It is exported for the same reason as [LintIgnoreOf]: the linter reads
+// the file text alongside the loader, and one spelling of a step boundary is
+// the only way the two agree on which step a line belongs to.
+func StepOf(line string) (string, bool) {
+	annotation, ok := annotationOf(line)
+	if !ok {
+		return "", false
+	}
+
+	name, ok := strings.CutPrefix(annotation, AnnotationStep)
+	if !ok {
+		return "", false
+	}
+
+	return strings.TrimSpace(name), true
+}
+
+// LintIgnoreOf returns the body of a lint directive, and whether the line is
+// one.
+//
+// It is exported because the linter reads the directives out of the file text
+// itself, for the line numbers an audit of them needs, and the two must agree
+// on what one looks like: a line the loader waves through and the linter does
+// not read is a suppression nobody honours.
+func LintIgnoreOf(line string) (string, bool) {
+	annotation, ok := annotationOf(line)
+	if !ok {
+		return "", false
+	}
+
+	rest, ok := strings.CutPrefix(annotation, AnnotationLintIgnore)
+	if !ok {
+		return "", false
+	}
+
+	// "lint:ignoreL004" is a different word, and belongs in the loader's
+	// unknown-annotation error rather than in a directive nobody typed.
+	if rest != "" && !unicode.IsSpace(rune(rest[0])) {
+		return "", false
+	}
+
+	return strings.TrimSpace(rest), true
+}
+
 // apply records one annotation against the step being accumulated.
 func apply(s *Step, annotation string) error {
 	switch annotation {
-	case annNoTx:
+	case AnnotationNoTx:
 		s.Kind = step.KindDDLNoTx
 		return nil
 
-	case annNoLockTimeout:
+	case AnnotationNoLockTimeout:
 		s.NoLockTimeout = true
 		return nil
 	}
 
-	if expr, ok := strings.CutPrefix(annotation, annSatisfied); ok {
+	if expr, ok := strings.CutPrefix(annotation, AnnotationSatisfied); ok {
 		return applySatisfied(s, strings.TrimSpace(expr))
 	}
 
-	if spec, ok := strings.CutPrefix(annotation, annBackfill); ok {
+	if spec, ok := strings.CutPrefix(annotation, AnnotationBackfill); ok {
 		return applyBackfill(s, strings.TrimSpace(spec))
 	}
 
@@ -235,7 +318,7 @@ func applyBackfill(s *Step, spec string) error {
 	}
 
 	if s.Backfill.Table == "" || s.Backfill.Key == "" {
-		return fmt.Errorf("%w: backfill needs table= and key=", ErrBadBackfill)
+		return fmt.Errorf("%w: backfill needs %s= and %s=", ErrBadBackfill, BackfillTable, BackfillKey)
 	}
 
 	return nil
@@ -244,13 +327,13 @@ func applyBackfill(s *Step, spec string) error {
 // applyBackfillField records one setting of a backfill annotation.
 func applyBackfillField(s *Step, name, value string) error {
 	switch name {
-	case "table":
+	case BackfillTable:
 		s.Backfill.Table = value
 
-	case "key":
+	case BackfillKey:
 		s.Backfill.Key = value
 
-	case "batch":
+	case BackfillBatch:
 		batch, err := strconv.Atoi(value)
 		if err != nil || batch <= 0 {
 			return fmt.Errorf("%w: batch %q is not a positive number", ErrBadBackfill, value)
@@ -258,7 +341,7 @@ func applyBackfillField(s *Step, name, value string) error {
 
 		s.Backfill.Batch = batch
 
-	case "max_lag_bytes":
+	case BackfillMaxLag:
 		lag, err := strconv.ParseInt(value, 10, 64)
 		if err != nil || lag < 0 {
 			return fmt.Errorf("%w: max_lag_bytes %q is not a number", ErrBadBackfill, value)

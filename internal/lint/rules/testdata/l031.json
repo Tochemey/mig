@@ -1,0 +1,30 @@
+{
+  "findings": [
+    {
+      "rule": "L031",
+      "severity": "error",
+      "message": "renaming the column users.handle to \"nickname\" breaks every process still using the old name at the moment it commits, and no deploy order avoids it. Add the new name alongside, move readers and writers to it, then drop the old one",
+      "detail": "ACCESS EXCLUSIVE on users, held for catalog work only; blocks reads and writes",
+      "file": "1_l031.sql",
+      "step": "flagged_column",
+      "span": {
+        "start": 29,
+        "end": 79,
+        "line": 2
+      }
+    },
+    {
+      "rule": "L031",
+      "severity": "error",
+      "message": "renaming the table sessions to \"user_sessions\" breaks every process still using the old name at the moment it commits, and no deploy order avoids it. Add the new name alongside, move readers and writers to it, then drop the old one",
+      "detail": "ACCESS EXCLUSIVE on sessions, held for catalog work only; blocks reads and writes",
+      "file": "1_l031.sql",
+      "step": "flagged_table",
+      "span": {
+        "start": 110,
+        "end": 154,
+        "line": 5
+      }
+    }
+  ]
+}

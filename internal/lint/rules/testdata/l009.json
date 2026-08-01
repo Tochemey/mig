@@ -1,0 +1,17 @@
+{
+  "findings": [
+    {
+      "rule": "L009",
+      "severity": "warn",
+      "message": "an inline UNIQUE builds its index while blocking all access to users; add the column plain, then create a unique index concurrently in a notx step",
+      "detail": "ACCESS EXCLUSIVE on users, held for an index build; blocks reads and writes",
+      "file": "1_l009.sql",
+      "step": "flagged",
+      "span": {
+        "start": 22,
+        "end": 69,
+        "line": 2
+      }
+    }
+  ]
+}

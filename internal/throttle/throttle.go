@@ -37,6 +37,13 @@ import (
 	"time"
 )
 
+// lagQuery reports the furthest-behind replica. A primary with no replicas
+// returns no rows, which is no lag rather than an error.
+const lagQuery = `
+SELECT coalesce(max(sent_lsn - replay_lsn), 0)::bigint
+  FROM pg_stat_replication
+ WHERE replay_lsn IS NOT NULL`
+
 const (
 	// MinBatch and MaxBatch bound the batch size however the feedback moves.
 	// Below the floor the per-batch overhead dominates; above the ceiling one
@@ -173,13 +180,6 @@ type replicationLag struct {
 func Replication(db *sql.DB) LagSource {
 	return replicationLag{db: db}
 }
-
-// lagQuery reports the furthest-behind replica. A primary with no replicas
-// returns no rows, which is no lag rather than an error.
-const lagQuery = `
-SELECT coalesce(max(sent_lsn - replay_lsn), 0)::bigint
-  FROM pg_stat_replication
- WHERE replay_lsn IS NOT NULL`
 
 // Lag reports how far the furthest-behind replica is, in bytes.
 func (r replicationLag) Lag(ctx context.Context) (int64, error) {
