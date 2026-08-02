@@ -50,6 +50,12 @@ const (
 
 	// IdleInTransactionTimeout stops a wedged step from holding locks forever.
 	IdleInTransactionTimeout = 30 * time.Second
+
+	// Postgres GUC names applied by [Prepare].
+	applicationName   = "application_name"
+	lockTimeout       = "lock_timeout"
+	statementTimeout  = "statement_timeout"
+	idleInTransaction = "idle_in_transaction_session_timeout"
 )
 
 // ErrTransactionPooling reports a pooler that discards session state.
@@ -74,15 +80,15 @@ type Config struct {
 }
 
 // Prepare applies cfg to a pinned connection.
-func Prepare(ctx context.Context, conn *sql.Conn, cfg Config) error {
+func Prepare(ctx context.Context, conn *sql.Conn, config Config) error {
 	settings := []struct {
 		name  string
 		value string
 	}{
-		{"application_name", cfg.Application},
-		{"lock_timeout", milliseconds(cfg.LockTimeout)},
-		{"statement_timeout", milliseconds(cfg.StatementTimeout)},
-		{"idle_in_transaction_session_timeout", milliseconds(IdleInTransactionTimeout)},
+		{applicationName, config.Application},
+		{lockTimeout, milliseconds(config.LockTimeout)},
+		{statementTimeout, milliseconds(config.StatementTimeout)},
+		{idleInTransaction, milliseconds(IdleInTransactionTimeout)},
 	}
 
 	for _, setting := range settings {
@@ -116,13 +122,13 @@ func milliseconds(d time.Duration) string {
 func DetectPooling(ctx context.Context, conn *sql.Conn) error {
 	probe := "mig-probe-" + rand.Text()
 
-	if _, err := conn.ExecContext(ctx, "SELECT set_config('application_name', $1, false)", probe); err != nil {
+	if _, err := conn.ExecContext(ctx, "SELECT set_config($1, $2, false)", applicationName, probe); err != nil {
 		return fmt.Errorf("probe for connection pooling: %w", err)
 	}
 
 	var observed string
 
-	if err := conn.QueryRowContext(ctx, "SELECT current_setting('application_name')").Scan(&observed); err != nil {
+	if err := conn.QueryRowContext(ctx, "SELECT current_setting($1)", applicationName).Scan(&observed); err != nil {
 		return fmt.Errorf("probe for connection pooling: %w", err)
 	}
 

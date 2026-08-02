@@ -18,7 +18,7 @@ Kill a migration part way through, by SIGKILL, a pod eviction or a lost node, an
 
 mig is a command line tool for running migrations as a job, and a Go library, [pkg/mig](pkg/mig), for services that embed their migrations and verify them at startup. Both are one engine: every command is a thin wrapper over the library, so the two cannot drift apart.
 
-It also lints. `mig lint` reports which statements will lock your tables, in what mode, for how long, and rewrites the ones that will hurt into steps that will not. See [Linting](#linting).
+It also lints. `mig lint` reports which statements will lock your tables, in what mode, for how long. With `--fix`, it rewrites the ones that will hurt into steps that will not. See [Linting](#linting).
 
 ## Contents
 
@@ -63,7 +63,7 @@ Postgres has statements that refuse to run inside a transaction: `CREATE INDEX C
 - The **catalog** is Postgres's own account of what exists: `pg_class`, `pg_index`, `pg_attribute` and the rest of the system tables. An index or a column is real exactly when the catalog says it is.
 - The **ledger** is mig's bookkeeping: a schema named `mig`, created on the first run, holding what the catalog cannot know: each step's attempts, prior errors, a backfill's cursor, and the lease. It records what mig did, which is not the same as what is true.
 
-Before a step runs, mig asks the catalog what the actual state is and acts on the answer. The invalid index above is found, dropped and rebuilt, whatever state the database starts in, and the ledger is never permitted to authorize that decision. One invariant governs the whole design:
+Before a step runs, mig asks the catalog what the actual state is and acts on the answer. The invalid index above is found, dropped and rebuilt, whatever state the database starts in. The ledger does not authorize that decision: for non-transactional steps and backfills it is only a checkpoint and a trail. The one exception is a transactional step whose ledger row committed in the same transaction as its DDL. There "succeeded" cannot describe work that did not happen, so trusting it is safe. One invariant governs the whole design:
 
 > Every step must converge to `succeeded` from an arbitrary, unknown starting state, using only the catalog and its own checkpoint.
 
@@ -77,7 +77,7 @@ Before a step runs, mig asks the catalog what the actual state is and acts on th
 undefined: pgquery.Parse
 ```
 
-If you see that, install a C toolchain and set `CGO_ENABLED=1`. On Debian and Ubuntu that is `build-essential`, on Alpine `build-base`, on macOS the Xcode command line tools. Cross-compiling needs a cross C toolchain for the same reason, since `GOOS` or `GOARCH` set to something other than the host also turns cgo off by default.
+If you see that, install a C toolchain and set `CGO_ENABLED=1`. On Debian and Ubuntu that is `build-essential`, on Alpine `build-base`, on macOS the Xcode command line tools. Cross-compiling needs a cross C toolchain too, since `GOOS` or `GOARCH` set to something other than the host also turns cgo off by default.
 
 The command line tool:
 
@@ -104,7 +104,7 @@ docker run --rm \
 
 Requirements for building from source:
 
-- Go 1.26 or later, and a C compiler, for the reason above. The parser is why quoted identifiers, embedded comments, partial indexes and multi-line statements are read the way the server reads them rather than guessed at with regular expressions.
+- Go 1.26.5 or later, and a C compiler, for the reason above. The parser is why quoted identifiers, embedded comments, partial indexes and multi-line statements are read the way the server reads them rather than guessed at with regular expressions.
 - Postgres, to run the tests. The matrices run against 17 and 18 on every change.
 
 ## Quick start
@@ -151,7 +151,7 @@ mig up --dsn "$DATABASE_URL" --dir migrations
 
 The step lines are the progress display, on stderr; on a terminal the running step animates in place with its elapsed time. The JSON line is the summary, on stdout, for a pipeline to parse.
 
-Run it again, or kill the first run part way through and then run it again. Either way the next run does only what is missing, and a run with nothing to do displays nothing:
+Run it again, or kill the first run part way through and then run it again. Either way the next run does only what is missing. A run with nothing left to apply prints no progress lines on stderr; the summary JSON still goes to stdout:
 
 ```json
 {"migrations":1,"steps_total":2,"applied":0,"skipped":2,"repaired":0,"duration_ms":14,"steps":[...]}
@@ -175,17 +175,16 @@ Kill it again during the backfill that follows, and the third run picks up at th
       ✓ 13s
 ```
 
-Every step goes through the same sequence, whatever happened before it:
+Every step starts the same way: ask the catalog whether the work is already present, and skip it if it is. What happens when work remains depends on the [step kind](#step-kinds):
 
-1. Ask the catalog whether the work is already present. If it is, skip the step. The ledger is not consulted.
-2. If the work is absent, read the ledger to find out whether an earlier attempt left the database part way through. An interrupted concurrent build leaves an invalid index, which is dropped before the rebuild.
-3. Record the attempt, then run the statement. The attempt count is written first, so a crash during the statement leaves a trace.
-4. Check the condition again. A step that reports success without changing the catalog fails instead of being recorded as done.
+1. **Transactional (`ddl_tx`).** The DDL and its ledger row commit in one transaction. A crash rolls both back, so there is nothing to repair and no postcondition to re-check. If the ledger already records the step as succeeded (which it can only do if that commit landed), the step is skipped without re-running the SQL. That is the only place the ledger decides.
+2. **Non-transactional (`ddl_notx`).** Repair first when an earlier attempt left partial work (an invalid concurrent index is dropped). Record the attempt, then run the statement, then check the catalog again. A step that reports success without changing the catalog fails instead of being recorded as done.
+3. **Backfill.** Resume from the last committed cursor. Each batch commits its rows with that cursor. After the walk finishes, the author-supplied `satisfied:` predicate must still hold, or the step fails.
 
 Two things make this safe when more than one runner starts:
 
 - **A fenced lease.** One runner applies at a time and holds a lease carrying a monotonic fence token. Every ledger write re-asserts that token in the same transaction. A runner that was frozen past its expiry, by a GC pause or a stalled VM, finds its writes rejected when it wakes instead of overwriting its successor.
-- **Transactional steps commit their ledger row with their DDL.** There is no window between the two, so nothing needs reconciling. This is the one case where the ledger decides whether a step is done.
+- **Separate pools for control and batch work.** The CLI opens two connections to the same database so a long backfill cannot starve the heartbeat that holds the lease. Library callers that run backfills should set `Options.Work` to a second pool so the same starvation cannot happen.
 
 ## Migration format
 
@@ -193,16 +192,16 @@ Migrations are hand-written SQL files named `<version>_<name>.sql` and applied i
 
 No annotation is mandatory. A plain `.sql` file with none at all is a valid migration: the whole file runs as one transactional step named `step_1`. Annotations come in when a step departs from that default: to split a file into steps, to leave the transaction, or to batch a data change.
 
-An annotation is a comment line starting with `-- +mig `, so a migration file is still valid SQL. It applies to the step it appears in: `step:` starts the next step, and any other annotation before the first `step:` starts an implicit one. An annotation mig does not recognise is an error when the file loads, not a comment to skip, so a typo cannot silently drop an instruction.
+An annotation is a comment line starting with `-- +mig`, so a migration file is still valid SQL. It applies to the step it appears in: `step:` starts the next step, and any other annotation before the first `step:` starts an implicit one. An annotation mig does not recognise is an error when the file loads, not a comment to skip, so a typo cannot silently drop an instruction.
 
-| Annotation                                                    | Required                                                                                                                                                              | Effect                                                                                                                                                                |
-|---------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `-- +mig step: <name>`                                        | Never. A file with no `step:` lines is one step named `step_1`.                                                                                                       | Starts a step. The SQL that follows belongs to it.                                                                                                                    |
-| `-- +mig notx`                                                | On every step holding a statement Postgres refuses inside a transaction: `CREATE INDEX CONCURRENTLY`, `VALIDATE CONSTRAINT` and similar. Never inferred from the SQL. | Runs the step outside a transaction.                                                                                                                                  |
-| `-- +mig backfill: table=T key=K [batch=N] [max_lag_bytes=N]` | For any batched data change. `table` and `key` are required; the bracketed settings are optional.                                                                     | A resumable, batched data change of exactly one statement.                                                                                                            |
-| `-- +mig satisfied: sql(<expr>)`                              | On every backfill, and on a `notx` step whose condition cannot be inferred.                                                                                           | Supply the done-condition yourself when it cannot be inferred. The expression must return a single boolean.                                                           |
-| `-- +mig no_lock_timeout`                                     | Never.                                                                                                                                                                | Drop the default `lock_timeout` for this step.                                                                                                                        |
-| `-- +mig lint:ignore <rule> reason="<why>"`                   | Never.                                                                                                                                                                | Silence one [lint](#silencing-a-rule) rule over this step, or over the file when it stands above the first `step:`. The reason is mandatory. The executor ignores it. |
+| Annotation                                                    | Required                                                                                                                                                                                                                      | Effect                                                                                                                                                                |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-- +mig step: <name>`                                        | Never. A file with no `step:` lines is one step named `step_1`.                                                                                                                                                               | Starts a step. The SQL that follows belongs to it.                                                                                                                    |
+| `-- +mig notx`                                                | On every step holding a statement Postgres refuses inside a transaction: `CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `ALTER TYPE ... ADD VALUE`, `VALIDATE CONSTRAINT`, and similar. Never inferred from the SQL. | Runs the step outside a transaction.                                                                                                                                  |
+| `-- +mig backfill: table=T key=K [batch=N] [max_lag_bytes=N]` | For a multi-batch rewrite of existing rows too large for one transaction. `table` and `key` are required; `key` must be an integer column; the bracketed settings are optional.                                               | A resumable, batched data change of exactly one statement.                                                                                                            |
+| `-- +mig satisfied: sql(<expr>)`                              | On every backfill, and on a `notx` step whose condition cannot be inferred.                                                                                                                                                   | Supply the done-condition yourself when it cannot be inferred. The expression must return a single boolean.                                                           |
+| `-- +mig no_lock_timeout`                                     | Never.                                                                                                                                                                                                                        | Drop the default `lock_timeout` on this step's session. Does not affect backfill batch transactions, which always keep the default.                                   |
+| `-- +mig lint:ignore <rule> reason="<why>"`                   | Never.                                                                                                                                                                                                                        | Silence one [lint](#silencing-a-rule) rule over this step, or over the file when it stands above the first `step:`. The reason is mandatory. The executor ignores it. |
 
 `notx` is the one requirement not caught before run time: mig never changes a step's kind from its SQL, so a `CREATE INDEX CONCURRENTLY` in a step without `notx` fails when Postgres refuses to run it inside the step's transaction. Everything else is checked as the files load, before anything is applied: a backfill missing `table=`, `key=` or `satisfied:`, a `satisfied:` in any form other than `sql(<expr>)`, a `notx` step with no condition, a step with no SQL, and a backfill holding more than one statement are all rejected by `mig plan` and at the start of `mig up`.
 
@@ -211,31 +210,35 @@ An annotation is a comment line starting with `-- +mig `, so a migration file is
 Every step runs as one of three kinds. The names appear in `mig plan`, in the summary's `kind` field and in `mig status`:
 
 | Kind       | How a step gets it          | What it means                                                                                                                                                                |
-|------------|-----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| ---------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ddl_tx`   | The default.                | Runs inside a transaction, and its ledger row commits in that same transaction. An interrupted attempt rolls back whole, so there is never anything to reconcile.            |
 | `ddl_notx` | The `notx` annotation.      | Runs outside a transaction, for the statements Postgres refuses inside one. Judged against the catalog, and repaired first when an earlier attempt left partial work behind. |
-| `backfill` | The `backfill:` annotation. | A batched data change. Each batch commits together with its cursor, so an interrupted run resumes from the last committed batch.                                             |
+| `backfill` | The `backfill:` annotation. | A batched rewrite of existing rows over an integer key. Each batch commits together with its cursor, so an interrupted run resumes from the last committed batch.            |
 
 ### Inferred conditions
 
-You rarely write a `satisfied:` annotation. mig derives the condition from the statement:
+You rarely write a `satisfied:` annotation. mig derives the condition from the statement. The words below are what `mig plan` prints:
 
 | Statement                         | Judged done when                          |
-|-----------------------------------|-------------------------------------------|
+| --------------------------------- | ----------------------------------------- |
 | `CREATE INDEX`                    | The index exists and is valid and ready.  |
-| `DROP INDEX`                      | The index is gone.                        |
+| `DROP INDEX`                      | The index is absent.                      |
 | `ALTER TABLE ADD COLUMN`          | The column exists.                        |
 | `ALTER TABLE DROP COLUMN`         | The table exists and the column does not. |
 | `ALTER TABLE ADD CONSTRAINT`      | The constraint exists.                    |
 | `ALTER TABLE VALIDATE CONSTRAINT` | The constraint exists and is validated.   |
 | `CREATE TABLE`                    | The relation exists.                      |
-| `ALTER TYPE ADD VALUE`            | The label is present.                     |
+| `ALTER TYPE ADD VALUE`            | The enum has the label.                   |
 
 A step counts as done only when every statement in it does. A non-transactional step whose condition cannot be inferred is rejected by `mig plan` and at the start of a run, before anything is applied.
 
 ### Backfills
 
-A backfill names its table and key and marks the key range each batch covers:
+A backfill rewrites existing rows in short transactions. It does not insert new data; future rows get values from a column default, a trigger, or the application. Use it for a data change too large or too locking for one commit (fill a new column, copy from a legacy column, normalize values) when the run must survive kills without redoing committed work or missing rows.
+
+A small update that fits under a normal lock belongs in a transactional step. DDL that Postgres refuses inside a transaction needs `notx`. A multi-batch rewrite of rows that already exist is a backfill.
+
+A backfill names its table and an integer key column (typically a `bigint` primary key). UUID, text and composite keys are not supported. Write unqualified names; `table=public.users` is quoted as a single identifier and will not resolve.
 
 ```sql
 -- +mig step: fill_email
@@ -247,13 +250,13 @@ UPDATE users SET email = legacy_email
 
 mig substitutes `:cursor_lo` and `:cursor_hi` with each batch's key range. The low bound is exclusive and the high bound inclusive, so write the predicate as `key > :cursor_lo AND key <= :cursor_hi` and consecutive batches cannot overlap.
 
-Each batch commits with the cursor that covers it, in one transaction. The rows and the cursor cannot land separately.
+The run is a loop, not a single statement. mig loads any cursor left in the ledger (or starts just below `min(key)`), reads the key range once, then for each batch applies the statement over the next span of keys and commits that work together with the advanced cursor in one fenced transaction. A kill mid-batch rolls both back; the next run resumes from the last committed cursor. Between batches the throttle resizes the next span from how long the last batch took and how far replication lag has grown, and it may pause when replicas are behind.
 
 Pagination is by key range only. `OFFSET` rescans every row it skips, so its cost grows with the square of the table, and it misses rows when concurrent writes shift what it counts past.
 
-Batch size adapts. It halves when replication lag passes `max_lag_bytes` or a batch runs longer than the target, and grows by a quarter when neither happens, staying between 100 and 50,000 rows. Batches run on a separate connection pool so a backfill cannot starve the heartbeat that holds the lease.
+Batch size adapts. Without `batch=` it starts at 1000. It halves when a batch runs longer than 500ms, or when `max_lag_bytes` is set and replica lag (read from `pg_stat_replication` on the control connection) exceeds it, and grows by a quarter when neither happens, staying between 100 and 50,000. Omit `max_lag_bytes` to disable the lag signal: only batch duration drives the size then, and Wait never pauses for replicas. The CLI runs batches on a separate connection pool so a backfill cannot starve the lease heartbeat; see [As a library](#as-a-library) for the equivalent when embedding.
 
-A backfill requires `satisfied:`. Its cursor lives in the ledger, and the ledger does not decide whether work remains.
+A backfill requires `satisfied:`. The cursor records how far the key walk has got; it does not decide whether work remains. Rows inserted past the high watermark, or filtered out by the statement's `WHERE`, can still need updating after the walk finishes. `satisfied:` is checked after the loop, and the step succeeds only when it reports true.
 
 ## Linting
 
@@ -309,7 +312,7 @@ mig lint --dir migrations --dsn "$REPLICA_URL"
     a rewrite is available: mig lint --fix
 ```
 
-The same statement against a twelve-row lookup table is reported as `info`. That is the point: a rewrite of a small table is not worth failing a build over, and saying otherwise costs the tool its credibility on every finding after it.
+The same statement against a twelve-row lookup table is reported as `info`. A rewrite of a small table is not worth failing a build over, and treating it as one costs the tool its credibility on every finding after it.
 
 Connected mode also supplies three things offline cannot:
 
@@ -322,7 +325,7 @@ Point it at a production-shaped replica or a restored snapshot. It changes no sc
 ### The rules
 
 | ID     | Detects                                                         | Severity | Fix      |
-|--------|-----------------------------------------------------------------|----------|----------|
+| ------ | --------------------------------------------------------------- | -------- | -------- |
 | `L001` | `CREATE INDEX` without `CONCURRENTLY`                           | by size  | no       |
 | `L002` | `CONCURRENTLY` inside a transactional step                      | error    | no       |
 | `L003` | `ADD COLUMN` whose default rewrites the table                   | by size  | yes      |
@@ -401,13 +404,13 @@ mig lint --dir migrations --fix
 apply 1 fix(es) to 1 file(s)? [y/N]:
 ```
 
-The output above is abridged: each generated step also carries the `satisfied:` predicate that lets it be re-run after a kill. `--fix --yes` skips the question, for a branch a CI job pushes to. Add `--dsn` and the generated backfill pages by the table's real primary key instead of assuming `id`.
+The output above is abridged: generated steps that cannot be inferred carry a `satisfied:` predicate so they can be re-run after a kill; steps whose condition mig can derive from the SQL omit it. `--fix --yes` skips the question, for a branch a CI job pushes to. Add `--dsn` and the generated backfill pages by the table's real primary key instead of assuming `id`.
 
 Every generated step carries a comment saying why it exists, because a fix nobody reads is a fix nobody can review.
 
 Where a rewrite cannot be completed safely on its own, the fix is a plan rather than a migration. `ALTER COLUMN TYPE` is one: swapping a column's type needs the application to write to both columns across a deploy, which no linter can generate. The fix is inserted above the statement, fully commented out, with a `TODO` naming the application change, and the original statement is left alone.
 
-Every executable fix is held to the executor rather than to an opinion. The fixed migration is applied to a clone of the same database and has to produce a schema fingerprint identical to the one the unsafe statement produces, and it has to lint clean afterwards. A fix that produced a different schema would be worse than no fix at all.
+Executable fixes are checked in this repository's CI against a clone of the same database: the fixed migration must produce a schema fingerprint identical to the unsafe statement and must lint clean afterwards. A fix that produced a different schema would be worse than no fix at all. `mig lint --fix` itself only shows the diff and rewrites the file; it does not run that check.
 
 ### Silencing a rule
 
@@ -419,7 +422,7 @@ When you have looked at a finding and disagree with it, silence that rule with a
 CREATE INDEX idx_lookup_code ON lookup (code);
 ```
 
-The reason is mandatory. A directive without one is itself an error, because a suppression nobody had to justify is one nobody can audit later.
+The reason is mandatory. A directive without one is itself an error (reported as rule `L000`), because a suppression nobody had to justify is one nobody can audit later.
 
 The directive covers the step it sits in, or the whole file when it stands above the first `step:` line. It is an annotation rather than a plain comment, which means adding one to a migration that has already been applied does not change the step's checksum and will not be reported as drift.
 
@@ -487,7 +490,7 @@ Findings belong where the review happens rather than in a log tab nobody opens, 
 
 A linter tells you what a statement does. It cannot tell you what that statement will cost on your database, under your traffic, because the cost is not a property of the statement.
 
-`ALTER TABLE users ADD COLUMN note text` takes `ACCESS EXCLUSIVE` and holds it for microseconds. On an idle table nobody notices. Behind a thirty-second reporting query it waits thirty seconds for the lock, and because Postgres grants locks in the order they were requested, every query that arrives while it waits queues behind it, including the ones that would never have conflicted with the migration at all. The table is unavailable for thirty seconds because of a statement that needed the lock for a microsecond. Nothing about that is visible in the SQL.
+`ALTER TABLE users ADD COLUMN note text` takes `ACCESS EXCLUSIVE` and holds it for microseconds. On an idle table nobody notices. Behind a thirty-second reporting query it waits thirty seconds for the lock, and because Postgres grants locks in the order they were requested, every query that arrives while it waits queues behind it, including the ones that would never have conflicted with the migration at all. The table is unavailable for thirty seconds because of a statement that needed the lock for a microsecond. None of that shows up in the SQL.
 
 `mig lint verify` measures it. It applies the migrations to a database of its own making, under traffic you describe, and reports what that did to the traffic.
 
@@ -539,7 +542,7 @@ slow_read:
 ```
 
 | Key         | Required               | Meaning                                                                                                      |
-|-------------|------------------------|--------------------------------------------------------------------------------------------------------------|
+| ----------- | ---------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `setup`     | yes                    | Builds the schema and rows the migration runs against.                                                       |
 | `keys`      | when a query binds one | The key space `$1` is drawn from.                                                                            |
 | `queries`   | yes                    | The fast traffic. Each needs `name` and `sql`. `key` binds `$1`, and `rate` is per second, defaulting to 50. |
@@ -551,25 +554,25 @@ slow_read:
 
 Measurement happens from both sides, because either one alone can mislead. Client-side latency gives p50, p99, p999 and the maximum, before and during. Server-side sampling of `pg_stat_activity` says what the time was spent waiting on, which turns "queries got slow" into "queries waited on `Lock:relation`".
 
-`--budget` takes any of `p50`, `p99`, `p999` and `max_block`, as `name=duration` pairs. A term left out is not checked. Exceeding any term exits non-zero, which is what makes this a gate rather than a report. `max_block` matters more than it looks: a block of a third of a second inside a window measured in seconds hurts only a few percent of queries, so it can sit under a p99 budget while being exactly the thing you wanted to catch.
+`--budget` takes any of `p50`, `p99`, `p999` and `max_block`, as `name=duration` pairs. A term left out is not checked. Exceeding any term exits non-zero, so this is a gate, not only a report. `max_block` matters more than it looks: a block of a third of a second inside a window measured in seconds hurts only a few percent of queries, so it can sit under a p99 budget while still being the outage you meant to catch.
 
 ## The command line
 
-| Command           | What it does                                                                           |
-|-------------------|----------------------------------------------------------------------------------------|
-| `mig up`          | Applies every pending step, in order, under one lease.                                 |
-| `mig plan`        | Prints each step and the condition it will be judged by. Opens no connection.          |
-| `mig verify`      | Reports whether the database shows every migration. Takes no lease and writes nothing. |
-| `mig status`      | Prints what the ledger records: state, attempts, checkpoint and last error.            |
-| `mig import`      | Adopts a goose or golang-migrate history.                                              |
-| `mig fingerprint` | Prints a canonical digest of the schema.                                               |
-| `mig lint`        | Reports the locks each statement takes, and rewrites the ones that hurt.               |
-| `mig lint verify` | Applies the migrations under a workload and measures what they cost.                   |
+| Command           | What it does                                                                                   |
+| ----------------- | ---------------------------------------------------------------------------------------------- |
+| `mig up`          | Applies every pending step, in order, under one lease.                                         |
+| `mig plan`        | Prints each step and the condition it will be judged by. Opens no connection.                  |
+| `mig verify`      | Reports whether the database shows every migration. Takes no lease and writes nothing.         |
+| `mig status`      | Prints what the ledger records: state, attempts, checkpoint and last error.                    |
+| `mig import`      | Adopts a goose or golang-migrate history. Fails immediately if another runner holds the lease. |
+| `mig fingerprint` | Prints a canonical digest of the schema.                                                       |
+| `mig lint`        | Reports the locks each statement takes; with `--fix`, rewrites the ones that hurt.             |
+| `mig lint verify` | Applies the migrations under a workload and measures what they cost.                           |
 
 Every setting is a flag. Three of them also read an environment variable, which supplies the default when the flag is absent. An explicit flag always wins.
 
 | Variable        | Flag          | Used by                                                   |
-|-----------------|---------------|-----------------------------------------------------------|
+| --------------- | ------------- | --------------------------------------------------------- |
 | `MIG_DSN`       | `--dsn`       | `up`, `verify`, `status`, `import`, `fingerprint`, `lint` |
 | `MIG_DIR`       | `--dir`       | `up`, `plan`, `verify`, `import`, `lint`                  |
 | `MIG_LEASE_TTL` | `--lease-ttl` | `up`, `import`                                            |
@@ -582,28 +585,30 @@ mig up                       # uses both variables
 mig up --dir db/hotfix       # the flag overrides MIG_DIR
 ```
 
+Connect directly to Postgres, or through a session-pooling port. Transaction pooling (the usual PgBouncer default) discards session settings and advisory locks between statements, and mig refuses to run against it.
+
 ### Common flags
 
-| Flag            | Default      | Commands                                          | Meaning                                                                                                                                                                                                 |
-|-----------------|--------------|---------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `--dsn`         | `MIG_DSN`    | `up`, `verify`, `status`, `import`, `fingerprint` | Postgres connection string. Required. The command fails before connecting if it is empty.                                                                                                               |
-| `--dir`         | `migrations` | `up`, `plan`, `verify`, `import`, `lint`          | Directory holding the migration files.                                                                                                                                                                  |
-| `--lease-ttl`   | `30s`        | `up`, `import`                                    | How long the lease stays valid without a heartbeat. A value that does not parse as a Go duration is ignored and the default used, so a typo cannot shorten a lease into one that expires mid-migration. |
-| `--on-locked`   | `wait`       | `up`                                              | `wait` blocks until the lease is free. `fail` exits with code 4 straight away.                                                                                                                          |
-| `--allow-drift` | `false`      | `up`                                              | Continue when a migration was edited after it was applied. Without it, a checksum mismatch on a succeeded step stops the run.                                                                           |
-| `--verbose`     | `false`      | `up`                                              | Structured JSON logs on stderr instead of the progress display, carrying the same records.                                                                                                              |
-| `--from`        | none         | `import`                                          | History to adopt: `goose` or `golang-migrate`. Required.                                                                                                                                                |
-| `--json`        | `false`      | `status`                                          | Emit the report as JSON instead of a table.                                                                                                                                                             |
-| `--describe`    | `false`      | `fingerprint`                                     | Print the rows behind the digest instead of the digest.                                                                                                                                                 |
+| Flag            | Default      | Commands                                          | Meaning                                                                                                                                                                         |
+| --------------- | ------------ | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--dsn`         | `MIG_DSN`    | `up`, `verify`, `status`, `import`, `fingerprint` | Postgres connection string. Required. The command fails before connecting if it is empty. See also Lint flags for optional `--dsn` on `lint`.                                   |
+| `--dir`         | `migrations` | `up`, `plan`, `verify`, `import`, `lint`          | Directory holding the migration files.                                                                                                                                          |
+| `--lease-ttl`   | `30s`        | `up`, `import`                                    | How long the lease stays valid without a heartbeat. An unusable `MIG_LEASE_TTL` is ignored and the default used; an invalid `--lease-ttl` flag fails the command at parse time. |
+| `--on-locked`   | `wait`       | `up`                                              | `wait` blocks until the lease is free. `fail` exits with code 4 straight away. `import` always fails immediately if the lease is held.                                          |
+| `--allow-drift` | `false`      | `up`                                              | Continue when a migration was edited after it was applied. Without it, a checksum mismatch on a succeeded step stops the run.                                                   |
+| `--verbose`     | `false`      | `up`                                              | Structured JSON logs on stderr instead of the progress display, carrying the same records.                                                                                      |
+| `--from`        | none         | `import`                                          | History to adopt: `goose` or `golang-migrate`. Required.                                                                                                                        |
+| `--json`        | `false`      | `status`                                          | Emit the report as JSON instead of a table.                                                                                                                                     |
+| `--describe`    | `false`      | `fingerprint`                                     | Print the rows behind the digest instead of the digest.                                                                                                                         |
 
-Two values are fixed rather than configurable. A step waits at most 3 seconds for a lock, since a migration that blocks behind a long transaction should give way rather than queue behind it and hold up every writer after it. Use `-- +mig no_lock_timeout` on the step that needs to wait. A backfill without a `batch=` setting starts at 1000 rows and adapts from there.
+A few session timeouts are fixed rather than configurable. A step waits at most 3 seconds for a lock, since a migration that blocks behind a long transaction should give way rather than queue behind it and hold up every writer after it. Use `-- +mig no_lock_timeout` on a DDL step that needs to wait (not on backfill batches). Transactional steps also carry a 30-second `statement_timeout` and a 30-second idle-in-transaction timeout; `notx` steps drop the statement timeout so a concurrent index build is not killed mid-flight. A backfill without a `batch=` setting starts at 1000 rows and adapts from there.
 
 ### Lint flags
 
 `mig lint` takes `--dir` and `--dsn` as above, and:
 
 | Flag                    | Default         | Meaning                                                                                                                        |
-|-------------------------|-----------------|--------------------------------------------------------------------------------------------------------------------------------|
+| ----------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `--dsn`                 | `MIG_DSN`       | Read table sizes from this database and grade the findings by them. Optional: without it the linter connects to nothing.       |
 | `--format`              | `human`         | `human`, `json`, `sarif` or `github`.                                                                                          |
 | `--target-version`      | `18`            | The Postgres major the migrations are written for. Ignored with `--dsn`, which uses the server's own.                          |
@@ -615,7 +620,7 @@ Two values are fixed rather than configurable. A step waits at most 3 seconds fo
 `mig lint verify` takes `--dir` as above, and:
 
 | Flag         | Default   | Meaning                                                                                                                                     |
-|--------------|-----------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| ------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--dsn`      | `MIG_DSN` | A server to build the throwaway database on, not a database to migrate. Required.                                                           |
 | `--workload` | none      | Workload file describing the traffic to run. Required.                                                                                      |
 | `--budget`   | none      | What the run may cost, as `p99=50ms,max_block=2s`. Terms: `p50`, `p99`, `p999`, `max_block`. Without it the run reports and always exits 0. |
@@ -626,7 +631,7 @@ Two values are fixed rather than configurable. A step waits at most 3 seconds fo
 A scheduler needs to tell another runner holding the lease apart from a failed migration, so the codes are part of the interface:
 
 | Code | Meaning                                                                                                                               |
-|------|---------------------------------------------------------------------------------------------------------------------------------------|
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `0`  | Converged. For `lint`, no error-severity finding. For `lint verify`, inside the budget.                                               |
 | `1`  | Failed. For `lint`, at least one error-severity finding. For `lint verify`, the budget was exceeded or the migration would not apply. |
 | `3`  | Work outstanding. `verify` only.                                                                                                      |
@@ -667,7 +672,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 ```
 
 | Function                                       | What it does                                                       |
-|------------------------------------------------|--------------------------------------------------------------------|
+| ---------------------------------------------- | ------------------------------------------------------------------ |
 | `Up(ctx, db, fsys, opts)`                      | Applies every outstanding step under the lease.                    |
 | `Verify(ctx, db, fsys)`                        | Returns an error wrapping `ErrPending` if anything is outstanding. |
 | `Pending(ctx, db, fsys)`                       | The same result as a list, for a caller that reports it itself.    |
@@ -679,7 +684,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 The linter is there too, so a project can run it from a Go test rather than a shell:
 
 | Function                                                             | What it does                                                                   |
-|----------------------------------------------------------------------|--------------------------------------------------------------------------------|
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | `Lint(fsys, targetVersion, policy)`                                  | Lints offline. The policy may be nil.                                          |
 | `LintConnected(ctx, db, fsys, policy)`                               | The same with the catalog in reach: sizes, size-scaled severity and estimates. |
 | `LoadPolicy(path, dir)`                                              | Reads a `.miglint.yaml` and resolves its overrides for one directory.          |
@@ -690,11 +695,11 @@ The linter is there too, so a project can run it from a Go test rather than a sh
 
 Sentinel errors: `ErrPending`, `ErrLocked`, `ErrFenced`, `ErrChecksumDrift` and `ErrUnknownSource`.
 
-`Options` works as its zero value. `TTL` defaults to `DefaultTTL`, `OnLocked` to `Wait`, and `Work` to the pool passed in.
+`Options` works as its zero value. `TTL` defaults to `DefaultTTL`, `OnLocked` to `Wait`, and `Work` to the pool passed in. For a long backfill, set `Work` to a second `*sql.DB` against the same database so batch traffic cannot starve the lease heartbeat.
 
 ## Deploying
 
-Run `mig up` as a job. Call `Verify` when the service starts.
+Run `mig up` as a job. Call `Verify` when the service starts. Point `--dsn` at a direct Postgres connection or a session-pooling port; transaction pooling is refused.
 
 ```sh
 mig up --dsn "$DATABASE_URL" --dir migrations
@@ -713,7 +718,7 @@ Applying migrations on service boot has two problems. Every replica races to do 
 
 For a project already on [goose](https://github.com/pressly/goose) or [golang-migrate](https://github.com/golang-migrate/migrate). The files stay where they are and keep their names and their contents. The only thing that changes is which tool runs them.
 
-The shape is the same for both: point mig at the existing directory, import the history once per database, and use `mig up` from then on. Existing files run unchanged, and new migrations can use steps, backfills and inferred conditions.
+The shape is the same for both: point mig at the existing directory, import the history once per database, and use `mig up` from then on. Existing files run unchanged, and new migrations can use steps, backfills and inferred conditions. Import fails if the source tool's history table is absent (`goose_db_version` or `schema_migrations`).
 
 Each line of the import report says what happens to one migration:
 

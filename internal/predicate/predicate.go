@@ -38,13 +38,35 @@ import (
 	"github.com/tochemey/mig/internal/step"
 )
 
-// Check is an inferred precondition together with the words for it.
+// Check is the catalog question a step asks before (and sometimes after) it
+// runs, plus the words that name that question.
 //
-// The description is derived from the same switch as the predicate, so what
-// `mig plan` prints and what the executor evaluates cannot drift apart.
+// Satisfied is what the executor calls: looking only at Postgres, is the work
+// already there? A true answer skips the step; a false one means there is still
+// work to do. For non-transactional steps it is also the postcondition after
+// Apply, so a statement that reported success without changing the catalog
+// fails instead of being recorded as done.
+//
+// Describe is the same question in words. `mig plan` prints it as the last
+// column, with no database connection:
+//
+//	$ mig plan --dir migrations
+//	20240817120000_create_users
+//	  0  create_users  ddl_tx    relation users exists
+//	  1  index_email   ddl_notx  index idx_users_email exists and is valid and ready
+//
+// The two fields are produced together from one switch in [Infer] (or from the
+// author's expression in [SQL]). Keeping them on one type is what stops the
+// printed plan from drifting away from the predicate the executor actually
+// evaluates. A nil Check means inference could not classify every statement;
+// non-transactional steps refuse that at plan time rather than becoming
+// unreconcilable at run time.
 type Check struct {
+	// Satisfied reports whether the catalog already shows the work as done.
 	Satisfied step.Predicate
-	Describe  string
+
+	// Describe is the human form of Satisfied, printed by `mig plan`.
+	Describe string
 }
 
 // Infer derives a check from a step's statements, returning nil when it cannot.

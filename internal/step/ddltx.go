@@ -42,6 +42,8 @@ type DDLTx struct {
 	satisfied  Predicate
 }
 
+var _ TxStep = (*DDLTx)(nil)
+
 // NewDDLTx builds a transactional step. The predicate may be nil.
 func NewDDLTx(meta Meta, statements []parse.Statement, satisfied Predicate) *DDLTx {
 	return &DDLTx{meta: meta, statements: statements, satisfied: satisfied}

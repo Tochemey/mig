@@ -47,6 +47,8 @@ type DDLNoTx struct {
 	satisfied  Predicate
 }
 
+var _ NoTxStep = (*DDLNoTx)(nil)
+
 // NewDDLNoTx builds a non-transactional step from its classified statements.
 //
 // The predicate is required: without one, a step that cannot be wrapped in a

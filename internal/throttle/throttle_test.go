@@ -25,32 +25,13 @@ package throttle_test
 
 import (
 	"context"
+	"database/sql/driver"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/tochemey/mig/internal/throttle"
 )
-
-// The lag signal is mocked here. What the throttle does with a number is the
-// logic worth pinning down; whether pg_stat_replication produces the number is
-// a question for a real replica.
-
-// fixedLag reports a constant lag.
-type fixedLag int64
-
-// Lag reports the constant.
-func (l fixedLag) Lag(context.Context) (int64, error) {
-	return int64(l), nil
-}
-
-// failingLag stands in for a lag query that cannot run.
-type failingLag struct{}
-
-// Lag always fails.
-func (failingLag) Lag(context.Context) (int64, error) {
-	return 0, errors.New("no replication view")
-}
 
 // TestBatchGrowsWhenHealthy covers the recovery path: batches creep back up
 // when nothing is struggling.
@@ -217,5 +198,53 @@ func TestWaitHonoursCancellation(t *testing.T) {
 
 	if err := th.Wait(ctx, time.Minute); !errors.Is(err, context.Canceled) {
 		t.Fatalf("wait returned %v, want context.Canceled", err)
+	}
+}
+
+// TestReplicationReportsLag covers the happy path through pg_stat_replication's
+// adapter: a row comes back and becomes a byte count the throttle can use.
+func TestReplicationReportsLag(t *testing.T) {
+	const want int64 = 4096
+
+	source := throttle.Replication(openStub(t, []driver.Value{want}, nil))
+
+	got, err := source.Lag(t.Context())
+	if err != nil {
+		t.Fatalf("lag: %v", err)
+	}
+
+	if got != want {
+		t.Fatalf("lag = %d, want %d", got, want)
+	}
+}
+
+// TestReplicationTreatsNoRowsAsNoLag covers a primary with nothing in
+// pg_stat_replication. That is healthy, not an error.
+func TestReplicationTreatsNoRowsAsNoLag(t *testing.T) {
+	source := throttle.Replication(openStub(t, nil, nil))
+
+	got, err := source.Lag(t.Context())
+	if err != nil {
+		t.Fatalf("lag: %v", err)
+	}
+
+	if got != 0 {
+		t.Fatalf("lag = %d, want 0 when there are no replicas", got)
+	}
+}
+
+// TestReplicationWrapsQueryFailures covers a lag read that cannot run. The
+// throttle must see the failure rather than treat it as zero lag.
+func TestReplicationWrapsQueryFailures(t *testing.T) {
+	injected := errors.New("connection reset")
+	source := throttle.Replication(openStub(t, nil, injected))
+
+	_, err := source.Lag(t.Context())
+	if err == nil {
+		t.Fatal("lag reported success on a failed query")
+	}
+
+	if !errors.Is(err, injected) {
+		t.Fatalf("lag error %v does not wrap the query failure", err)
 	}
 }

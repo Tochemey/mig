@@ -116,6 +116,22 @@ type ResumableStep interface {
 // Pagination is by key range, never by OFFSET: OFFSET rescans everything it
 // skips, so the cost grows with the square of the table, and it silently misses
 // rows when concurrent writes shift what it is counting past.
+//
+// Each call to [Backfill.Run] does the same work:
+//
+//  1. Load any cursor an earlier run left in the ledger, or start just below
+//     the table's lowest key so the first exclusive bound still covers it.
+//  2. Read min/max of the key outside a transaction. An empty table is done.
+//  3. For each batch, apply the statement over (cursor, cursor+batch], write
+//     the advanced cursor into the same fenced transaction, and commit both
+//     together so neither can land without the other.
+//  4. Hand the batch's duration to the throttle, which resizes the next batch
+//     and may pause when replicas are behind.
+//
+// Done-ness is not the cursor reaching max(key). Concurrent inserts past the
+// high watermark, or a statement that filters rows, can leave work behind. The
+// required [Predicate] is what decides whether any remain; the executor checks
+// it after Run returns.
 type Backfill struct {
 	meta      Meta
 	statement string
@@ -169,8 +185,17 @@ func (s *Backfill) boundsQuery() string {
 		catalog.QualifiedIdent("", s.cfg.Table)
 }
 
-// Run walks the key range, committing each batch with the cursor that covers
-// it, and resuming from wherever an earlier run stopped.
+// Run walks the key range until the cursor reaches the high watermark.
+//
+// Progress is the ledger cursor, not the statement's rows-affected. A batch
+// that matches no rows still advances the cursor: the key span was covered,
+// and leaving the cursor behind would re-scan it forever. The statement's
+// WHERE clause may filter further; that is why Satisfied, not the cursor, is
+// the postcondition the executor checks after Run returns.
+//
+// env supplies the fenced transaction, the checkpoint write that must share
+// it, lock-retry around each batch, and the throttle that sizes the next one.
+// See [Backfill] for the loop those pieces sit in.
 func (s *Backfill) Run(ctx context.Context, env Env) error {
 	cursor, resumed, err := s.resume(ctx, env)
 	if err == nil && resumed && env.Resume != nil {

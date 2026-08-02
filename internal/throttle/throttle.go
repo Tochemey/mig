@@ -96,43 +96,50 @@ type Throttle struct {
 }
 
 // New builds a throttle from cfg.
-func New(cfg Config) *Throttle {
-	if cfg.TargetLatency <= 0 {
-		cfg.TargetLatency = DefaultTargetLatency
+func New(config Config) *Throttle {
+	if config.TargetLatency <= 0 {
+		config.TargetLatency = DefaultTargetLatency
 	}
 
 	return &Throttle{
-		batch:         clamp(cfg.Batch),
-		maxLagBytes:   cfg.MaxLagBytes,
-		targetLatency: cfg.TargetLatency,
-		lag:           cfg.Lag,
+		batch:         clamp(config.Batch),
+		maxLagBytes:   config.MaxLagBytes,
+		targetLatency: config.TargetLatency,
+		lag:           config.Lag,
 	}
 }
 
 // Batch is the size the next batch should use.
-func (t *Throttle) Batch() int {
-	return t.batch
+func (x *Throttle) Batch() int {
+	return x.batch
 }
 
-// Wait resizes the next batch from what the last one cost, and pauses when the
-// replicas are behind.
+// Wait closes the feedback loop after a batch finishes.
 //
-// Both signals shrink the batch: a batch that took too long is holding its
-// locks too long, and replication lag means the replicas cannot keep up with
-// what has already been written.
-func (t *Throttle) Wait(ctx context.Context, lastBatch time.Duration) error {
-	lag, err := t.observe(ctx)
+// It reads two signals: whether lastBatch ran longer than the target latency,
+// and whether replica lag is above MaxLagBytes. Either one means the database
+// is struggling, so the next [Batch] is halved (then clamped). When both are
+// clear the batch grows by a quarter, recovering gently so the throttle does
+// not oscillate.
+//
+// Resizing always runs first. A slow batch still needs a smaller next write
+// even when the replicas are keeping up: the fix for holding locks too long is
+// to write less, not to sleep. Only when lag is above the limit does Wait then
+// pause for lastBatch, giving the replicas roughly the time back that writing
+// the batch cost them. Cancellation during that pause returns ctx.Err.
+func (x *Throttle) Wait(ctx context.Context, lastBatch time.Duration) error {
+	lag, err := x.observe(ctx)
 	if err != nil {
 		return err
 	}
 
-	behind := t.maxLagBytes > 0 && lag > t.maxLagBytes
-	slow := lastBatch > t.targetLatency
+	behind := x.maxLagBytes > 0 && lag > x.maxLagBytes
+	slow := lastBatch > x.targetLatency
 
 	if behind || slow {
-		t.batch = clamp(t.batch / shrinkFactor)
+		x.batch = clamp(x.batch / shrinkFactor)
 	} else {
-		t.batch = clamp(t.batch * growNumerator / growDenominator)
+		x.batch = clamp(x.batch * growNumerator / growDenominator)
 	}
 
 	if !behind {
@@ -150,12 +157,12 @@ func (t *Throttle) Wait(ctx context.Context, lastBatch time.Duration) error {
 }
 
 // observe reads the replication lag, treating an absent source as no lag.
-func (t *Throttle) observe(ctx context.Context) (int64, error) {
-	if t.lag == nil {
+func (x *Throttle) observe(ctx context.Context) (int64, error) {
+	if x.lag == nil {
 		return 0, nil
 	}
 
-	return t.lag.Lag(ctx)
+	return x.lag.Lag(ctx)
 }
 
 // clamp holds a batch size inside the supported range.
