@@ -359,6 +359,8 @@ Point it at a production-shaped replica or a restored snapshot. It changes no sc
 
 Rules never fire against a table the same migration creates earlier in the file. That table is empty when the statement runs, so a `CREATE TABLE` followed by a `CREATE INDEX` is silent, which is the most common migration shape there is.
 
+How often the linter is wrong is measured, not guessed. The full rule set was run against the migration histories of Mattermost, Sourcegraph and Temporal at pinned commits, 677 files under each runner's real transaction semantics, and every finding was graded by hand against the SQL its span points at. The first run was wrong nearly half the time, which forced the lock model to learn which relations a step can actually block; on the rerun, 3 of 569 findings (0.53%) are false, each one documented. The corpus, the grading criteria and every verdict are in [docs/audit.md](docs/audit.md).
+
 ### Fixing
 
 `mig lint --fix` rewrites the flagged statements as safe steps. It shows the diff and asks before writing anything:
