@@ -172,9 +172,15 @@ var matrix = []lockmatrix.Case{
 		Visits: []string{"t"},
 	},
 	{
+		// Since 17.11 and 18.6 a new dependency takes a shared lock on the
+		// object it depends on, so the referenced unique index is held at
+		// ACCESS SHARE whether or not the key is validated.
 		Name: "add_foreign_key_not_valid",
 		Seed: withParent,
 		SQL:  "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (c) REFERENCES parent (id) NOT VALID",
+		Extra: map[string]lockmodel.LockMode{
+			"parent_pkey": lockmodel.AccessShare,
+		},
 	},
 	{
 		Name:   "add_primary_key",
@@ -279,9 +285,13 @@ var matrix = []lockmatrix.Case{
 		SQL:  "ANALYZE t",
 	},
 	{
+		// The referenced unique index is held as for add_foreign_key_not_valid.
 		Name: "create_table_with_foreign_key",
 		Seed: withParent,
 		SQL:  "CREATE TABLE child (id int REFERENCES parent (id))",
+		Extra: map[string]lockmodel.LockMode{
+			"parent_pkey": lockmodel.AccessShare,
+		},
 	},
 	{
 		Name: "create_partition",
